@@ -43,7 +43,8 @@ actual object RadioController {
     private const val PREFS_NAME = "radiopm_prefs"
     private const val KEY_PRESETS_V4 = "saved_presets_v4_empty"
     private const val KEY_LAST_STATION = "last_station_id"
-    private const val KEY_CACHED_STATIONS = "cached_stations_json_v8"
+    private const val KEY_LAST_STATION_JSON = "last_station_json_v1"
+    private const val KEY_CACHED_STATIONS = "cached_stations_json_v9"
     private const val KEY_PRE_ALARM_ENABLED = "pre_alarm_enabled"
     private const val KEY_PRE_ALARM_TIME = "pre_alarm_target_ms"
 
@@ -56,7 +57,7 @@ actual object RadioController {
     private val _statusMessage = MutableStateFlow("Připraveno k poslechu")
     actual val statusMessage: StateFlow<String> = _statusMessage.asStateFlow()
 
-    private val _rdsText = MutableStateFlow("Vyber stanici a stiskni Play")
+    private val _rdsText = MutableStateFlow("")
     actual val rdsText: StateFlow<String> = _rdsText.asStateFlow()
 
     private val _allStations = MutableStateFlow(defaultCzechStations)
@@ -186,7 +187,9 @@ actual object RadioController {
             }
             ctx.startService(stopIntent)
         } else {
-            startStationService(_currentStation.value, fadeIn = false)
+            val st = _currentStation.value
+            saveLastStation(st)
+            startStationService(st, fadeIn = false)
         }
     }
 
@@ -194,7 +197,6 @@ actual object RadioController {
         val favoriteStations = _presets.value.filterNotNull()
         val listToCycle = if (favoriteStations.isNotEmpty()) favoriteStations else _allStations.value
         if (listToCycle.isEmpty()) return
-
         val cur = _currentStation.value
         val idx = listToCycle.indexOfFirst { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
         val nextStation = if (idx in listToCycle.indices) {
@@ -209,7 +211,6 @@ actual object RadioController {
         val favoriteStations = _presets.value.filterNotNull()
         val listToCycle = if (favoriteStations.isNotEmpty()) favoriteStations else _allStations.value
         if (listToCycle.isEmpty()) return
-
         val cur = _currentStation.value
         val idx = listToCycle.indexOfFirst { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
         val prevStation = if (idx in listToCycle.indices) {
@@ -222,7 +223,7 @@ actual object RadioController {
 
     actual fun selectAndPlayStation(station: RadioStation) {
         _currentStation.value = station
-        saveLastStation(station.id)
+        saveLastStation(station)
         if (station.faviconUrl.isNotBlank()) {
             requestStationIcon(station.faviconUrl)
         }
@@ -235,10 +236,10 @@ actual object RadioController {
             qualityLabel = variant.label
         )
         _allStations.value = _allStations.value.map {
-            if (it.id == station.id) updated else it
+            if (it.id == station.id || it.name.equals(station.name, ignoreCase = true)) updated else it
         }
         _presets.value = _presets.value.map {
-            if (it?.id == station.id) updated else it
+            if (it != null && (it.id == station.id || it.name.equals(station.name, ignoreCase = true))) updated else it
         }
         savePresetsToPrefs()
         selectAndPlayStation(updated)
@@ -344,12 +345,26 @@ actual object RadioController {
                 } catch (_: Exception) {
                 }
             }
-
             mainHandler.post {
                 if (fetched.isNotEmpty()) {
                     val merged = mergeStationsWithDefaults(fetched)
                     _allStations.value = merged
                     saveStationsToCache(merged)
+
+                    // Doplneni pripadnych variant a ikony u aktualne vybrane stanice bez jejiho prepsani
+                    val cur = _currentStation.value
+                    val matched = merged.find { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
+                    if (matched != null) {
+                        val updatedCur = cur.copy(
+                            backupUrl = cur.backupUrl.ifBlank { matched.backupUrl },
+                            faviconUrl = cur.faviconUrl.ifBlank { matched.faviconUrl },
+                            variants = if (matched.variants.size > cur.variants.size) matched.variants else cur.variants
+                        )
+                        _currentStation.value = updatedCur
+                        if (updatedCur.faviconUrl.isNotBlank()) {
+                            requestStationIcon(updatedCur.faviconUrl)
+                        }
+                    }
                 }
                 _isUpdatingStations.value = false
             }
@@ -401,7 +416,7 @@ actual object RadioController {
             }
 
             val slug = name.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "_").trim('_')
-            val id = "online_${stationCounter}_${slug.ifEmpty { "st" }}"
+            val id = if (slug.isNotEmpty()) "online_$slug" else "online_st_$stationCounter"
             result.add(
                 RadioStation(
                     id = id,
@@ -458,28 +473,65 @@ actual object RadioController {
         return result
     }
 
+    private fun stationToJson(st: RadioStation): JSONObject {
+        val obj = JSONObject()
+        obj.put("id", st.id)
+        obj.put("name", st.name)
+        obj.put("streamUrl", st.streamUrl)
+        obj.put("backupUrl", st.backupUrl)
+        obj.put("faviconUrl", st.faviconUrl)
+        obj.put("qualityLabel", st.qualityLabel)
+        val vArr = JSONArray()
+        for (v in st.variants) {
+            val vObj = JSONObject()
+            vObj.put("label", v.label)
+            vObj.put("url", v.url)
+            vObj.put("bitrate", v.bitrate)
+            vArr.put(vObj)
+        }
+        obj.put("variants", vArr)
+        return obj
+    }
+
+    private fun stationFromJson(obj: JSONObject, fallbackId: String): RadioStation {
+        val vArr = obj.optJSONArray("variants")
+        val variants = mutableListOf<StreamVariant>()
+        if (vArr != null) {
+            for (j in 0 until vArr.length()) {
+                val vObj = vArr.optJSONObject(j) ?: continue
+                val url = vObj.optString("url", "")
+                if (url.isNotEmpty()) {
+                    variants.add(
+                        StreamVariant(
+                            label = vObj.optString("label", "128 kbps"),
+                            url = url,
+                            bitrate = vObj.optInt("bitrate", 128)
+                        )
+                    )
+                }
+            }
+        }
+        val streamUrl = obj.optString("streamUrl", "")
+        val qualityLabel = obj.optString("qualityLabel", "128 kbps")
+        return RadioStation(
+            id = obj.optString("id").ifBlank { fallbackId },
+            name = obj.optString("name"),
+            streamUrl = streamUrl,
+            backupUrl = obj.optString("backupUrl"),
+            faviconUrl = obj.optString("faviconUrl"),
+            qualityLabel = qualityLabel,
+            variants = variants.ifEmpty {
+                listOf(StreamVariant(qualityLabel, streamUrl))
+            }
+        )
+    }
+
     private fun saveStationsToCache(stations: List<RadioStation>) {
         val ctx = appContext ?: return
         try {
             val arr = JSONArray()
             for (st in stations) {
-                val obj = JSONObject()
-                obj.put("id", st.id)
-                obj.put("name", st.name)
-                obj.put("streamUrl", st.streamUrl)
-                obj.put("backupUrl", st.backupUrl)
-                obj.put("faviconUrl", st.faviconUrl)
-                obj.put("qualityLabel", st.qualityLabel)
-                val vArr = JSONArray()
-                for (v in st.variants) {
-                    val vObj = JSONObject()
-                    vObj.put("label", v.label)
-                    vObj.put("url", v.url)
-                    vObj.put("bitrate", v.bitrate)
-                    vArr.put(vObj)
-                }
-                obj.put("variants", vArr)
-                arr.put(obj)
+                arr.put(stationToJson(st))
             }
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
@@ -497,35 +549,8 @@ actual object RadioController {
             val arr = JSONArray(raw)
             val loaded = mutableListOf<RadioStation>()
             for (i in 0 until arr.length()) {
-                val obj = arr.getJSONObject(i)
-                val vArr = obj.optJSONArray("variants")
-                val variants = mutableListOf<StreamVariant>()
-                if (vArr != null) {
-                    for (j in 0 until vArr.length()) {
-                        val vObj = vArr.getJSONObject(j)
-                        variants.add(
-                            StreamVariant(
-                                label = vObj.optString("label", "128 kbps"),
-                                url = vObj.optString("url", ""),
-                                bitrate = vObj.optInt("bitrate", 128)
-                            )
-                        )
-                    }
-                }
-                val rawId = obj.optString("id").ifBlank { "cached_$i" }
-                loaded.add(
-                    RadioStation(
-                        id = "${rawId}_$i",
-                        name = obj.optString("name"),
-                        streamUrl = obj.optString("streamUrl"),
-                        backupUrl = obj.optString("backupUrl"),
-                        faviconUrl = obj.optString("faviconUrl"),
-                        qualityLabel = obj.optString("qualityLabel", "128 kbps"),
-                        variants = variants.ifEmpty {
-                            listOf(StreamVariant(obj.optString("qualityLabel", "128 kbps"), obj.optString("streamUrl")))
-                        }
-                    )
-                )
+                val obj = arr.optJSONObject(i) ?: continue
+                loaded.add(stationFromJson(obj, "cached_$i"))
             }
             if (loaded.isNotEmpty()) {
                 _allStations.value = mergeStationsWithDefaults(loaded)
@@ -542,14 +567,7 @@ actual object RadioController {
                 if (st == null) {
                     arr.put(JSONObject.NULL)
                 } else {
-                    val obj = JSONObject()
-                    obj.put("id", st.id)
-                    obj.put("name", st.name)
-                    obj.put("streamUrl", st.streamUrl)
-                    obj.put("backupUrl", st.backupUrl)
-                    obj.put("faviconUrl", st.faviconUrl)
-                    obj.put("qualityLabel", st.qualityLabel)
-                    arr.put(obj)
+                    arr.put(stationToJson(st))
                 }
             }
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
@@ -560,12 +578,16 @@ actual object RadioController {
         }
     }
 
-    private fun saveLastStation(stationId: String) {
+    private fun saveLastStation(station: RadioStation) {
         val ctx = appContext ?: return
-        ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
-            .edit()
-            .putString(KEY_LAST_STATION, stationId)
-            .apply()
+        try {
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_LAST_STATION, station.id)
+                .putString(KEY_LAST_STATION_JSON, stationToJson(station).toString())
+                .apply()
+        } catch (_: Exception) {
+        }
     }
 
     private fun loadPresetsAndLastStation() {
@@ -579,17 +601,18 @@ actual object RadioController {
                 for (i in 0 until minOf(4, arr.length())) {
                     if (!arr.isNull(i)) {
                         val obj = arr.getJSONObject(i)
-                        val id = obj.optString("id")
-                        val name = obj.optString("name")
-                        val fromAll = _allStations.value.find { it.id == id || it.name.equals(name, ignoreCase = true) }
-                        list[i] = fromAll ?: RadioStation(
-                            id = id.ifBlank { "preset_$i" },
-                            name = name,
-                            streamUrl = obj.optString("streamUrl"),
-                            backupUrl = obj.optString("backupUrl"),
-                            faviconUrl = obj.optString("faviconUrl"),
-                            qualityLabel = obj.optString("qualityLabel", "128 kbps")
-                        )
+                        val parsed = stationFromJson(obj, "preset_$i")
+                        val fromAll = _allStations.value.find {
+                            it.id == parsed.id || it.name.equals(parsed.name, ignoreCase = true)
+                        }
+                        list[i] = if (fromAll != null) {
+                            fromAll.copy(
+                                streamUrl = parsed.streamUrl.ifBlank { fromAll.streamUrl },
+                                qualityLabel = parsed.qualityLabel.ifBlank { fromAll.qualityLabel }
+                            )
+                        } else {
+                            parsed
+                        }
                     }
                 }
                 _presets.value = list
@@ -600,10 +623,47 @@ actual object RadioController {
             _presets.value = List(4) { null }
         }
 
-        val lastId = prefs.getString(KEY_LAST_STATION, null)
-        if (lastId != null) {
-            _allStations.value.find { it.id == lastId }?.let {
-                _currentStation.value = it
+        // 1. Nacteni kompletniho objektu posledni spustene stanice z JSONu
+        var restoredStation: RadioStation? = null
+        val rawLastJson = prefs.getString(KEY_LAST_STATION_JSON, null)
+        if (!rawLastJson.isNullOrBlank()) {
+            try {
+                val obj = JSONObject(rawLastJson)
+                val parsed = stationFromJson(obj, "last_station")
+                if (parsed.name.isNotBlank() && parsed.streamUrl.isNotBlank()) {
+                    val fromAll = _allStations.value.find {
+                        it.id == parsed.id || it.name.equals(parsed.name, ignoreCase = true)
+                    }
+                    restoredStation = if (fromAll != null) {
+                        fromAll.copy(
+                            streamUrl = parsed.streamUrl.ifBlank { fromAll.streamUrl },
+                            qualityLabel = parsed.qualityLabel.ifBlank { fromAll.qualityLabel }
+                        )
+                    } else {
+                        parsed
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2. Zalozni nacteni podle ID, pokud JSON jeste nebyl ulozen
+        if (restoredStation == null) {
+            val lastId = prefs.getString(KEY_LAST_STATION, null)
+            if (!lastId.isNullOrBlank()) {
+                val cleanLastId = lastId.replace(Regex("_\\d+$"), "")
+                restoredStation = _allStations.value.find {
+                    it.id == lastId ||
+                        it.id == cleanLastId ||
+                        it.name.equals(lastId, ignoreCase = true)
+                }
+            }
+        }
+
+        if (restoredStation != null) {
+            _currentStation.value = restoredStation
+            if (restoredStation.faviconUrl.isNotBlank()) {
+                requestStationIcon(restoredStation.faviconUrl)
             }
         }
     }
@@ -641,6 +701,7 @@ actual object RadioController {
     actual fun toggleOneShotPreAlarm() {
         val ctx = appContext ?: return
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
+
         if (_isPreAlarmEnabled.value) {
             cancelPreAlarm(ctx, am)
             return

@@ -28,13 +28,13 @@ import platform.Foundation.NSOperationQueue
 import platform.Foundation.NSURL
 import platform.Foundation.NSUserDefaults
 import platform.Foundation.dataWithContentsOfURL
+import platform.darwin.DISPATCH_TIME_NOW
 import platform.darwin.NSEC_PER_SEC
 import platform.darwin.dispatch_after
 import platform.darwin.dispatch_async
 import platform.darwin.dispatch_get_global_queue
 import platform.darwin.dispatch_get_main_queue
 import platform.darwin.dispatch_time
-import platform.darwin. DISPATCH_TIME_NOW
 import platform.posix.memcpy
 
 actual fun decodeByteArrayToImageBitmap(bytes: ByteArray): ImageBitmap? {
@@ -47,6 +47,10 @@ actual fun decodeByteArrayToImageBitmap(bytes: ByteArray): ImageBitmap? {
 
 @OptIn(ExperimentalForeignApi::class)
 actual object RadioController {
+    private const val KEY_LAST_STATION_ID = "last_station_id"
+    private const val KEY_LAST_STATION_DATA = "last_station_data_v1"
+    private const val KEY_PRESET_PREFIX = "saved_preset_v1_"
+
     private var player: AVPlayer? = null
     private var audioObserversRegistered = false
     private var wasPlayingBeforeInterruption = false
@@ -112,6 +116,78 @@ actual object RadioController {
 
     private val _watchListScrollEvent = MutableStateFlow(0L to 0f)
     actual val watchListScrollEvent: StateFlow<Pair<Long, Float>> = _watchListScrollEvent.asStateFlow()
+
+    init {
+        loadSavedStateFromDefaults()
+    }
+
+    private fun serializeStation(st: RadioStation): String {
+        return listOf(st.id, st.name, st.streamUrl, st.backupUrl, st.faviconUrl, st.qualityLabel)
+            .joinToString("\t")
+    }
+
+    private fun deserializeStation(raw: String): RadioStation? {
+        val parts = raw.split("\t")
+        if (parts.size < 3) return null
+        val id = parts[0].trim()
+        val name = parts[1].trim()
+        val streamUrl = parts[2].trim()
+        if (name.isEmpty() || streamUrl.isEmpty()) return null
+        val backupUrl = parts.getOrNull(3)?.trim().orEmpty()
+        val faviconUrl = parts.getOrNull(4)?.trim().orEmpty()
+        val qualityLabel = parts.getOrNull(5)?.trim()?.ifEmpty { "128 kbps" } ?: "128 kbps"
+        val fromAll = _allStations.value.find { it.id == id || it.name.equals(name, ignoreCase = true) }
+        return if (fromAll != null) {
+            fromAll.copy(streamUrl = streamUrl, qualityLabel = qualityLabel)
+        } else {
+            RadioStation(
+                id = id.ifEmpty { "ios_saved" },
+                name = name,
+                streamUrl = streamUrl,
+                backupUrl = backupUrl,
+                faviconUrl = faviconUrl,
+                qualityLabel = qualityLabel
+            )
+        }
+    }
+
+    private fun saveLastStationToDefaults(station: RadioStation) {
+        val defs = NSUserDefaults.standardUserDefaults
+        defs.setObject(station.id, forKey = KEY_LAST_STATION_ID)
+        defs.setObject(serializeStation(station), forKey = KEY_LAST_STATION_DATA)
+    }
+
+    private fun loadSavedStateFromDefaults() {
+        val defs = NSUserDefaults.standardUserDefaults
+
+        // Nacteni 4 predvoleb
+        val loadedPresets = MutableList<RadioStation?>(4) { null }
+        for (i in 0..3) {
+            val rawPreset = defs.stringForKey("$KEY_PRESET_PREFIX$i")
+            if (!rawPreset.isNullOrBlank()) {
+                loadedPresets[i] = deserializeStation(rawPreset)
+            }
+        }
+        _presets.value = loadedPresets
+
+        // Nacteni posledni spustene stanice
+        var restored: RadioStation? = null
+        val rawLastData = defs.stringForKey(KEY_LAST_STATION_DATA)
+        if (!rawLastData.isNullOrBlank()) {
+            restored = deserializeStation(rawLastData)
+        }
+        if (restored == null) {
+            val lastId = defs.stringForKey(KEY_LAST_STATION_ID)
+            if (!lastId.isNullOrBlank()) {
+                restored = _allStations.value.find {
+                    it.id == lastId || it.name.equals(lastId, ignoreCase = true)
+                }
+            }
+        }
+        if (restored != null) {
+            _currentStation.value = restored
+        }
+    }
 
     private fun decodeCzechRdsBytes(bytes: ByteArray): String {
         if (bytes.isEmpty()) return ""
@@ -399,12 +475,14 @@ actual object RadioController {
 
     actual fun selectAndPlayStation(station: RadioStation) {
         _currentStation.value = station
+        saveLastStationToDefaults(station)
         playStation(station)
     }
 
     actual fun selectStationVariant(station: RadioStation, variant: StreamVariant) {
         val updated = station.copy(streamUrl = variant.url, qualityLabel = variant.label)
         _currentStation.value = updated
+        saveLastStationToDefaults(updated)
         playStation(updated)
     }
 
@@ -428,7 +506,7 @@ actual object RadioController {
         _isPlaying.value = true
         _statusMessage.value = "Hraje: ${station.name}"
         _rdsText.value = ""
-        NSUserDefaults.standardUserDefaults.setObject(station.id, forKey = "last_station_id")
+        saveLastStationToDefaults(station)
         startIosRdsPolling()
     }
 
@@ -441,6 +519,12 @@ actual object RadioController {
         val list = _presets.value.toMutableList()
         list[index] = station
         _presets.value = list
+        val defs = NSUserDefaults.standardUserDefaults
+        if (station != null) {
+            defs.setObject(serializeStation(station), forKey = "$KEY_PRESET_PREFIX$index")
+        } else {
+            defs.removeObjectForKey("$KEY_PRESET_PREFIX$index")
+        }
     }
 
     actual fun refreshOnlineStations() {
