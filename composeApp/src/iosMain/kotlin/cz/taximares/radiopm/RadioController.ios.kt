@@ -22,6 +22,7 @@ import platform.AVFoundation.pause
 import platform.AVFoundation.play
 import platform.AVFoundation.replaceCurrentItemWithPlayerItem
 import platform.Foundation.NSData
+import platform.Foundation.NSJSONSerialization
 import platform.Foundation.NSNotificationCenter
 import platform.Foundation.NSNumber
 import platform.Foundation.NSOperationQueue
@@ -50,6 +51,7 @@ actual object RadioController {
     private const val KEY_LAST_STATION_ID = "last_station_id"
     private const val KEY_LAST_STATION_DATA = "last_station_data_v1"
     private const val KEY_PRESET_PREFIX = "saved_preset_v1_"
+    private const val KEY_CACHED_STATIONS_IOS = "cached_stations_ios_v1"
 
     private val DECIMAL_ENTITY_REGEX = Regex("&#(\\d+);")
     private val HEX_ENTITY_REGEX = Regex("&#[xX]([0-9a-fA-F]+);")
@@ -96,8 +98,8 @@ actual object RadioController {
     private val _presets = MutableStateFlow<List<RadioStation?>>(List(4) { null })
     actual val presets: StateFlow<List<RadioStation?>> = _presets.asStateFlow()
 
-    private val _stationIcons = MutableStateFlow<Map<String, ByteArray>>(emptyMap())
-    actual val stationIcons: StateFlow<Map<String, ByteArray>> = _stationIcons.asStateFlow()
+    private val _stationIcons = MutableStateFlow>(emptyMap())
+    actual val stationIcons: StateFlow> = _stationIcons.asStateFlow()
 
     private val _isUpdatingStations = MutableStateFlow(false)
     actual val isUpdatingStations: StateFlow<Boolean> = _isUpdatingStations.asStateFlow()
@@ -121,12 +123,26 @@ actual object RadioController {
     actual val watchListScrollEvent: StateFlow<Pair<Long, Float>> = _watchListScrollEvent.asStateFlow()
 
     init {
+        loadCachedStationsFromDefaults()
         loadSavedStateFromDefaults()
+        refreshOnlineStations()
     }
 
     private fun serializeStation(st: RadioStation): String {
-        return listOf(st.id, st.name, st.streamUrl, st.backupUrl, st.faviconUrl, st.qualityLabel)
-            .joinToString("\t")
+        val variantsEncoded = st.variants.joinToString(";;") { v ->
+            val safeLabel = v.label.replace("|", " ").replace(";", " ").replace("\t", " ").replace("\n", " ")
+            val safeUrl = v.url.replace("|", "").replace(";", "").replace("\t", "").replace("\n", "")
+            "$safeLabel|$safeUrl|${v.bitrate}"
+        }
+        return listOf(
+            st.id.replace("\t", " ").replace("\n", " "),
+            st.name.replace("\t", " ").replace("\n", " "),
+            st.streamUrl.replace("\t", "").replace("\n", ""),
+            st.backupUrl.replace("\t", "").replace("\n", ""),
+            st.faviconUrl.replace("\t", "").replace("\n", ""),
+            st.qualityLabel.replace("\t", " ").replace("\n", " "),
+            variantsEncoded
+        ).joinToString("\t")
     }
 
     private fun deserializeStation(raw: String): RadioStation? {
@@ -139,9 +155,32 @@ actual object RadioController {
         val backupUrl = parts.getOrNull(3)?.trim().orEmpty()
         val faviconUrl = parts.getOrNull(4)?.trim().orEmpty()
         val qualityLabel = parts.getOrNull(5)?.trim()?.ifEmpty { "128 kbps" } ?: "128 kbps"
+        val variantsRaw = parts.getOrNull(6)?.trim().orEmpty()
+
+        val parsedVariants = mutableListOf<StreamVariant>()
+        if (variantsRaw.isNotEmpty()) {
+            for (vToken in variantsRaw.split(";;")) {
+                val vParts = vToken.split("|")
+                if (vParts.size >= 2) {
+                    val vLabel = vParts[0].trim().ifEmpty { qualityLabel }
+                    val vUrl = vParts[1].trim()
+                    val vBitrate = vParts.getOrNull(2)?.trim()?.toIntOrNull() ?: 128
+                    if (vUrl.isNotEmpty()) {
+                        parsedVariants.add(StreamVariant(label = vLabel, url = vUrl, bitrate = vBitrate))
+                    }
+                }
+            }
+        }
+
         val fromAll = _allStations.value.find { it.id == id || it.name.equals(name, ignoreCase = true) }
         return if (fromAll != null) {
-            fromAll.copy(streamUrl = streamUrl, qualityLabel = qualityLabel)
+            fromAll.copy(
+                streamUrl = streamUrl.ifBlank { fromAll.streamUrl },
+                backupUrl = backupUrl.ifBlank { fromAll.backupUrl },
+                faviconUrl = faviconUrl.ifBlank { fromAll.faviconUrl },
+                qualityLabel = qualityLabel.ifBlank { fromAll.qualityLabel },
+                variants = if (parsedVariants.size > fromAll.variants.size) parsedVariants else fromAll.variants
+            )
         } else {
             RadioStation(
                 id = id.ifEmpty { "ios_saved" },
@@ -149,8 +188,37 @@ actual object RadioController {
                 streamUrl = streamUrl,
                 backupUrl = backupUrl,
                 faviconUrl = faviconUrl,
-                qualityLabel = qualityLabel
+                qualityLabel = qualityLabel,
+                variants = parsedVariants.ifEmpty {
+                    listOf(StreamVariant(qualityLabel, streamUrl))
+                }
             )
+        }
+    }
+
+    private fun saveStationsToCache(stations: List<RadioStation>) {
+        try {
+            val serialized = stations.joinToString("\n") { serializeStation(it) }
+            NSUserDefaults.standardUserDefaults.setObject(serialized, forKey = KEY_CACHED_STATIONS_IOS)
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadCachedStationsFromDefaults() {
+        try {
+            val raw = NSUserDefaults.standardUserDefaults.stringForKey(KEY_CACHED_STATIONS_IOS)
+            if (raw.isNullOrBlank()) return
+            val loaded = mutableListOf<RadioStation>()
+            for (line in raw.split("\n")) {
+                val trimmed = line.trim()
+                if (trimmed.isNotEmpty()) {
+                    deserializeStation(trimmed)?.let { loaded.add(it) }
+                }
+            }
+            if (loaded.isNotEmpty()) {
+                _allStations.value = mergeStationsWithDefaults(loaded)
+            }
+        } catch (_: Exception) {
         }
     }
 
@@ -158,6 +226,19 @@ actual object RadioController {
         val defs = NSUserDefaults.standardUserDefaults
         defs.setObject(station.id, forKey = KEY_LAST_STATION_ID)
         defs.setObject(serializeStation(station), forKey = KEY_LAST_STATION_DATA)
+    }
+
+    private fun saveAllPresetsToDefaults() {
+        val defs = NSUserDefaults.standardUserDefaults
+        val list = _presets.value
+        for (i in 0..3) {
+            val st = list.getOrNull(i)
+            if (st != null) {
+                defs.setObject(serializeStation(st), forKey = "$KEY_PRESET_PREFIX$i")
+            } else {
+                defs.removeObjectForKey("$KEY_PRESET_PREFIX$i")
+            }
+        }
     }
 
     private fun loadSavedStateFromDefaults() {
@@ -187,7 +268,121 @@ actual object RadioController {
         }
         if (restored != null) {
             _currentStation.value = restored
+            if (restored.faviconUrl.isNotBlank()) {
+                requestStationIcon(restored.faviconUrl)
+            }
         }
+    }
+
+    private fun cleanStationGroupName(rawName: String): String {
+        return rawName
+            .replace(Regex("\\s*\\(\\d+\\s*kbps\\)", RegexOption.IGNORE_CASE), "")
+            .replace(Regex("\\s*-\\s*\\d+\\s*kbps$", RegexOption.IGNORE_CASE), "")
+            .trim()
+    }
+
+    private fun parseRadioBrowserData(data: NSData): List<RadioStation> {
+        val jsonArray = try {
+            NSJSONSerialization.JSONObjectWithData(data, options = 0u, error = null) as? List<*>
+        } catch (_: Exception) {
+            null
+        } ?: return emptyList()
+
+        val grouped = LinkedHashMap<String, MutableList<Triple<String, Int, String>>>()
+
+        for (element in jsonArray) {
+            val obj = element as? Map<*, *> ?: continue
+            val name = (obj["name"] as? String)?.trim().orEmpty()
+            val urlResolved = (obj["url_resolved"] as? String)?.trim().orEmpty()
+            val urlOrig = (obj["url"] as? String)?.trim().orEmpty()
+            val streamUrl = if (urlResolved.isNotEmpty()) urlResolved else urlOrig
+            val codec = (obj["codec"] as? String)?.trim()?.uppercase().orEmpty()
+            val bitrateNum = obj["bitrate"] as? NSNumber
+            val bitrate = bitrateNum?.intValue?.let { if (it <= 0) 128 else it } ?: 128
+            val favicon = (obj["favicon"] as? String)?.trim().orEmpty()
+
+            if (name.isEmpty() || streamUrl.isEmpty()) continue
+            if (codec.contains("UNKNOWN") ||
+                streamUrl.endsWith(".asx", ignoreCase = true) ||
+                streamUrl.endsWith(".wma", ignoreCase = true)
+            ) {
+                continue
+            }
+
+            val cleanName = cleanStationGroupName(name)
+            val list = grouped.getOrPut(cleanName) { mutableListOf() }
+            list.add(Triple(streamUrl, bitrate, favicon))
+        }
+
+        val result = mutableListOf<RadioStation>()
+        var stationCounter = 0
+        for ((name, streams) in grouped) {
+            stationCounter++
+            val uniqueStreams = streams.distinctBy { it.first }
+            val sorted = uniqueStreams.sortedByDescending { it.second }
+            val primary = sorted.first()
+            val backup = sorted.getOrNull(1)?.first ?: ""
+            val icon = sorted.firstOrNull { it.third.isNotEmpty() }?.third ?: ""
+
+            val variants = sorted.mapIndexed { idx, triple ->
+                val br = triple.second
+                val label = if (sorted.count { it.second == br } > 1) {
+                    "${br} kbps (#${idx + 1})"
+                } else {
+                    "${br} kbps"
+                }
+                StreamVariant(label = label, url = triple.first, bitrate = br)
+            }
+
+            val slug = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+            val id = if (slug.isNotEmpty()) "online_$slug" else "online_st_$stationCounter"
+            result.add(
+                RadioStation(
+                    id = id,
+                    name = name,
+                    streamUrl = primary.first,
+                    backupUrl = backup,
+                    faviconUrl = icon,
+                    qualityLabel = "${primary.second} kbps",
+                    variants = variants
+                )
+            )
+        }
+        return result
+    }
+
+    private fun mergeStationsWithDefaults(online: List<RadioStation>): List<RadioStation> {
+        val result = mutableListOf<RadioStation>()
+        val usedOnlineIndices = mutableSetOf<Int>()
+
+        for (def in defaultCzechStations) {
+            val matchIdx = online.indexOfFirst {
+                it.name.equals(def.name, ignoreCase = true) ||
+                    (def.id == "radiob_roudnice" && it.name.equals("Radio B", ignoreCase = true))
+            }
+            if (matchIdx >= 0) {
+                usedOnlineIndices.add(matchIdx)
+                val on = online[matchIdx]
+                val combinedVariants = (on.variants + def.variants).distinctBy { it.url }
+                result.add(
+                    def.copy(
+                        streamUrl = def.streamUrl,
+                        backupUrl = on.streamUrl.ifBlank { def.backupUrl },
+                        faviconUrl = def.faviconUrl.ifBlank { on.faviconUrl },
+                        variants = combinedVariants
+                    )
+                )
+            } else {
+                result.add(def)
+            }
+        }
+
+        for (i in online.indices) {
+            if (i !in usedOnlineIndices) {
+                result.add(online[i])
+            }
+        }
+        return result
     }
 
     private fun decodeCzechRdsBytes(bytes: ByteArray): String {
@@ -497,7 +692,8 @@ actual object RadioController {
         val favs = _presets.value.filterNotNull()
         val list = if (favs.isNotEmpty()) favs else _allStations.value
         if (list.isEmpty()) return
-        val idx = list.indexOfFirst { it.id == _currentStation.value.id }
+        val cur = _currentStation.value
+        val idx = list.indexOfFirst { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
         val next = if (idx in list.indices) list[(idx + 1) % list.size] else list.first()
         selectAndPlayStation(next)
     }
@@ -506,7 +702,8 @@ actual object RadioController {
         val favs = _presets.value.filterNotNull()
         val list = if (favs.isNotEmpty()) favs else _allStations.value
         if (list.isEmpty()) return
-        val idx = list.indexOfFirst { it.id == _currentStation.value.id }
+        val cur = _currentStation.value
+        val idx = list.indexOfFirst { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
         val prev = if (idx in list.indices) list[(idx - 1 + list.size) % list.size] else list.last()
         selectAndPlayStation(prev)
     }
@@ -514,11 +711,21 @@ actual object RadioController {
     actual fun selectAndPlayStation(station: RadioStation) {
         _currentStation.value = station
         saveLastStationToDefaults(station)
+        if (station.faviconUrl.isNotBlank()) {
+            requestStationIcon(station.faviconUrl)
+        }
         playStation(station)
     }
 
     actual fun selectStationVariant(station: RadioStation, variant: StreamVariant) {
         val updated = station.copy(streamUrl = variant.url, qualityLabel = variant.label)
+        _allStations.value = _allStations.value.map {
+            if (it.id == station.id || it.name.equals(station.name, ignoreCase = true)) updated else it
+        }
+        _presets.value = _presets.value.map {
+            if (it != null && (it.id == station.id || it.name.equals(station.name, ignoreCase = true))) updated else it
+        }
+        saveAllPresetsToDefaults()
         _currentStation.value = updated
         saveLastStationToDefaults(updated)
         playStation(updated)
@@ -557,15 +764,57 @@ actual object RadioController {
         val list = _presets.value.toMutableList()
         list[index] = station
         _presets.value = list
-        val defs = NSUserDefaults.standardUserDefaults
-        if (station != null) {
-            defs.setObject(serializeStation(station), forKey = "$KEY_PRESET_PREFIX$index")
-        } else {
-            defs.removeObjectForKey("$KEY_PRESET_PREFIX$index")
-        }
+        saveAllPresetsToDefaults()
     }
 
     actual fun refreshOnlineStations() {
+        if (_isUpdatingStations.value) return
+        _isUpdatingStations.value = true
+
+        dispatch_async(dispatch_get_global_queue(0, 0u)) {
+            val hosts = listOf(
+                "de1.api.radio-browser.info",
+                "at1.api.radio-browser.info",
+                "nl1.api.radio-browser.info",
+                "fi1.api.radio-browser.info"
+            )
+            var fetched: List<RadioStation> = emptyList()
+            for (host in hosts) {
+                try {
+                    val apiUrl = "https://$host/json/stations/bycountrycodeexact/CZ?hidebroken=true&order=clickcount&reverse=true&limit=1500"
+                    val nsUrl = NSURL.URLWithString(apiUrl)
+                    val data = nsUrl?.let { NSData.dataWithContentsOfURL(it) }
+                    if (data != null && data.length.toInt() > 10) {
+                        fetched = parseRadioBrowserData(data)
+                        if (fetched.isNotEmpty()) break
+                    }
+                } catch (_: Exception) {
+                }
+            }
+
+            dispatch_async(dispatch_get_main_queue()) {
+                if (fetched.isNotEmpty()) {
+                    val merged = mergeStationsWithDefaults(fetched)
+                    _allStations.value = merged
+                    saveStationsToCache(merged)
+
+                    val cur = _currentStation.value
+                    val matched = merged.find { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
+                    if (matched != null) {
+                        val updatedCur = cur.copy(
+                            backupUrl = cur.backupUrl.ifBlank { matched.backupUrl },
+                            faviconUrl = cur.faviconUrl.ifBlank { matched.faviconUrl },
+                            variants = if (matched.variants.size > cur.variants.size) matched.variants else cur.variants
+                        )
+                        _currentStation.value = updatedCur
+                        if (updatedCur.faviconUrl.isNotBlank()) {
+                            requestStationIcon(updatedCur.faviconUrl)
+                        }
+                    }
+                }
+                _isUpdatingStations.value = false
+            }
+        }
     }
 
     actual fun requestStationIcon(url: String) {
