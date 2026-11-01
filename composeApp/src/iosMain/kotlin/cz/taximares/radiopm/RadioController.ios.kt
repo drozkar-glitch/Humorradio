@@ -96,8 +96,8 @@ actual object RadioController {
     private val _presets = MutableStateFlow<List<RadioStation?>>(List(4) { null })
     actual val presets: StateFlow<List<RadioStation?>> = _presets.asStateFlow()
 
-    private val _stationIcons = MutableStateFlow>(emptyMap())
-    actual val stationIcons: StateFlow> = _stationIcons.asStateFlow()
+    private val _stationIcons = MutableStateFlow<Map<String, ByteArray>>(emptyMap())
+    actual val stationIcons: StateFlow<Map<String, ByteArray>> = _stationIcons.asStateFlow()
 
     private val _isUpdatingStations = MutableStateFlow(false)
     actual val isUpdatingStations: StateFlow<Boolean> = _isUpdatingStations.asStateFlow()
