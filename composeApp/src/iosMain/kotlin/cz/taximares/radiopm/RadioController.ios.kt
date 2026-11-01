@@ -51,6 +51,9 @@ actual object RadioController {
     private const val KEY_LAST_STATION_DATA = "last_station_data_v1"
     private const val KEY_PRESET_PREFIX = "saved_preset_v1_"
 
+    private val DECIMAL_ENTITY_REGEX = Regex("&#(\\d+);")
+    private val HEX_ENTITY_REGEX = Regex("&#[xX]([0-9a-fA-F]+);")
+
     private var player: AVPlayer? = null
     private var audioObserversRegistered = false
     private var wasPlayingBeforeInterruption = false
@@ -93,8 +96,8 @@ actual object RadioController {
     private val _presets = MutableStateFlow<List<RadioStation?>>(List(4) { null })
     actual val presets: StateFlow<List<RadioStation?>> = _presets.asStateFlow()
 
-    private val _stationIcons = MutableStateFlow<Map<String, ByteArray>>(emptyMap())
-    actual val stationIcons: StateFlow<Map<String, ByteArray>> = _stationIcons.asStateFlow()
+    private val _stationIcons = MutableStateFlow>(emptyMap())
+    actual val stationIcons: StateFlow> = _stationIcons.asStateFlow()
 
     private val _isUpdatingStations = MutableStateFlow(false)
     actual val isUpdatingStations: StateFlow<Boolean> = _isUpdatingStations.asStateFlow()
@@ -160,7 +163,6 @@ actual object RadioController {
     private fun loadSavedStateFromDefaults() {
         val defs = NSUserDefaults.standardUserDefaults
 
-        // Nacteni 4 predvoleb
         val loadedPresets = MutableList<RadioStation?>(4) { null }
         for (i in 0..3) {
             val rawPreset = defs.stringForKey("$KEY_PRESET_PREFIX$i")
@@ -170,7 +172,6 @@ actual object RadioController {
         }
         _presets.value = loadedPresets
 
-        // Nacteni posledni spustene stanice
         var restored: RadioStation? = null
         val rawLastData = defs.stringForKey(KEY_LAST_STATION_DATA)
         if (!rawLastData.isNullOrBlank()) {
@@ -256,6 +257,48 @@ actual object RadioController {
         return cleanAndRepairCzechText(sb.toString())
     }
 
+    private fun decodeHtmlEntities(input: String): String {
+        if (!input.contains('&')) return input
+        var s = input
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&ndash;", "–")
+            .replace("&mdash;", "—")
+            .replace("&aacute;", "á").replace("&Aacute;", "Á")
+            .replace("&eacute;", "é").replace("&Eacute;", "É")
+            .replace("&ecaron;", "ě").replace("&Ecaron;", "Ě")
+            .replace("&iacute;", "í").replace("&Iacute;", "Í")
+            .replace("&oacute;", "ó").replace("&Oacute;", "Ó")
+            .replace("&uacute;", "ú").replace("&Uacute;", "Ú")
+            .replace("&uring;", "ů").replace("&Uring;", "Ů")
+            .replace("&yacute;", "ý").replace("&Yacute;", "Ý")
+            .replace("&ccaron;", "č").replace("&Ccaron;", "Č")
+            .replace("&dcaron;", "ď").replace("&Dcaron;", "Ď")
+            .replace("&ncaron;", "ň").replace("&Ncaron;", "Ň")
+            .replace("&rcaron;", "ř").replace("&Rcaron;", "Ř")
+            .replace("&scaron;", "š").replace("&Scaron;", "Š")
+            .replace("&tcaron;", "ť").replace("&Tcaron;", "Ť")
+            .replace("&zcaron;", "ž").replace("&Zcaron;", "Ž")
+
+        if (s.contains("&#")) {
+            s = DECIMAL_ENTITY_REGEX.replace(s) { matchResult ->
+                val code = matchResult.groupValues[1].toIntOrNull()
+                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else matchResult.value
+            }
+            s = HEX_ENTITY_REGEX.replace(s) { matchResult ->
+                val code = matchResult.groupValues[1].toIntOrNull(16)
+                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else matchResult.value
+            }
+        }
+        return s
+    }
+
     private fun cleanAndRepairCzechText(input: String): String {
         if (input.isEmpty()) return ""
         var s = input
@@ -274,13 +317,8 @@ actual object RadioController {
             .replace("ĹŻ", "ů").replace("Ĺ®", "Ů")
             .replace("Ă˝", "ý").replace("Ăť", "Ý")
             .replace("Ĺľ", "ž").replace("Ĺ˝", "Ž")
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#039;", "'")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&ndash;", "–")
-            .replace("&mdash;", "—")
+
+        s = decodeHtmlEntities(s)
 
         if (s.contains('\uFFFD')) {
             s = repairServerReplacementChars(s)

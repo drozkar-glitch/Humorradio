@@ -63,6 +63,9 @@ class RadioService : Service() {
         private const val CHANNEL_ID = "radiopm_playback_channel_v3"
         private const val NOTIFICATION_ID = 1001
 
+        private val DECIMAL_ENTITY_REGEX = Regex("&#(\\d+);")
+        private val HEX_ENTITY_REGEX = Regex("&#[xX]([0-9a-fA-F]+);")
+
         private val WINDOWS_1250_TABLE = charArrayOf(
             '\u20AC', ' ', '\u201A', ' ', '\u201E', '\u2026', '\u2020', '\u2021',
             ' ', '\u2030', '\u0160', '\u2039', '\u015A', '\u0164', '\u017D', '\u0179',
@@ -114,7 +117,6 @@ class RadioService : Service() {
                 if (isPhoneCallActive()) {
                     pauseForPhoneCall()
                 } else {
-                    // Jina aplikace nebo notifikace na pozadi (napr. v noci) -> nevypinat radio, jen kratce ztlumit
                     duckBriefly()
                 }
             }
@@ -419,6 +421,48 @@ class RadioService : Service() {
         return cleanAndRepairCzechText(sb.toString())
     }
 
+    private fun decodeHtmlEntities(input: String): String {
+        if (!input.contains('&')) return input
+        var s = input
+            .replace("&amp;", "&")
+            .replace("&quot;", "\"")
+            .replace("&#039;", "'")
+            .replace("&#39;", "'")
+            .replace("&apos;", "'")
+            .replace("&nbsp;", " ")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&ndash;", "–")
+            .replace("&mdash;", "—")
+            .replace("&aacute;", "á").replace("&Aacute;", "Á")
+            .replace("&eacute;", "é").replace("&Eacute;", "É")
+            .replace("&ecaron;", "ě").replace("&Ecaron;", "Ě")
+            .replace("&iacute;", "í").replace("&Iacute;", "Í")
+            .replace("&oacute;", "ó").replace("&Oacute;", "Ó")
+            .replace("&uacute;", "ú").replace("&Uacute;", "Ú")
+            .replace("&uring;", "ů").replace("&Uring;", "Ů")
+            .replace("&yacute;", "ý").replace("&Yacute;", "Ý")
+            .replace("&ccaron;", "č").replace("&Ccaron;", "Č")
+            .replace("&dcaron;", "ď").replace("&Dcaron;", "Ď")
+            .replace("&ncaron;", "ň").replace("&Ncaron;", "Ň")
+            .replace("&rcaron;", "ř").replace("&Rcaron;", "Ř")
+            .replace("&scaron;", "š").replace("&Scaron;", "Š")
+            .replace("&tcaron;", "ť").replace("&Tcaron;", "Ť")
+            .replace("&zcaron;", "ž").replace("&Zcaron;", "Ž")
+
+        if (s.contains("&#")) {
+            s = DECIMAL_ENTITY_REGEX.replace(s) { matchResult ->
+                val code = matchResult.groupValues[1].toIntOrNull()
+                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else matchResult.value
+            }
+            s = HEX_ENTITY_REGEX.replace(s) { matchResult ->
+                val code = matchResult.groupValues[1].toIntOrNull(16)
+                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else matchResult.value
+            }
+        }
+        return s
+    }
+
     private fun cleanAndRepairCzechText(input: String): String {
         if (input.isEmpty()) return ""
         var s = input
@@ -437,13 +481,8 @@ class RadioService : Service() {
             .replace("ĹŻ", "ů").replace("Ĺ®", "Ů")
             .replace("Ă˝", "ý").replace("Ăť", "Ý")
             .replace("Ĺľ", "ž").replace("Ĺ˝", "Ž")
-            .replace("&amp;", "&")
-            .replace("&quot;", "\"")
-            .replace("&#039;", "'")
-            .replace("&#39;", "'")
-            .replace("&apos;", "'")
-            .replace("&ndash;", "–")
-            .replace("&mdash;", "—")
+
+        s = decodeHtmlEntities(s)
 
         if (s.contains('\uFFFD')) {
             s = repairServerReplacementChars(s)
@@ -508,8 +547,6 @@ class RadioService : Service() {
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build()
 
-        // handleAudioFocus = false: AudioFocus si hlidame sami pres AudioManager, aby zadna
-        // notifikace nebo proces na pozadi v noci nevypnul radio (pauza pouze pri skutecnem hovoru)
         val exo = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttrs, false)
@@ -606,7 +643,6 @@ class RadioService : Service() {
             return
         }
 
-        // Udrzime stav isPlaying = true a setOngoing(true), aby Android sluzbu pri nocnim vypadku Wi-Fi nezabil
         RadioController.updateState(true, "Obnovuji spojení: $currentStationName...")
         updateMediaSessionAndNotification(true)
         retryRunnable?.let { handler.removeCallbacks(it) }
