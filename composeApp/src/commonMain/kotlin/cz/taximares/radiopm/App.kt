@@ -70,6 +70,28 @@ import kotlinx.coroutines.launch
 private val StopRed = Color(0xFFE53935)
 private val PlayGreen = Color(0xFF00C853)
 
+private val UI_WIN_1250_TABLE = charArrayOf(
+    '\u20AC', ' ', '\u201A', ' ', '\u201E', '\u2026', '\u2020', '\u2021',
+    ' ', '\u2030', '\u0160', '\u2039', '\u015A', '\u0164', '\u017D', '\u0179',
+    '\u00C9', '\u2018', '\u2019', '\u201C', '\u201D', '\u2022', '\u2013', '\u2014',
+    ' ', '\u2122', '\u0161', '\u203A', '\u015B', '\u0165', '\u017E', '\u017A',
+    '\u00A0', '\u02C7', '\u02D8', '\u0141', '\u00A4', '\u0104', '\u00A6', '\u00A7',
+    '\u00A8', '\u00A9', '\u015E', '\u00AB', '\u00AC', '\u00AD', '\u00AE', '\u017B',
+    '\u00B0', '\u00B1', '\u02DB', '\u0142', '\u00B4', '\u00B5', '\u00B6', '\u00B7',
+    '\u00B8', '\u0105', '\u015F', '\u00BB', '\u013D', '\u02DD', '\u013E', '\u017C',
+    '\u0154', '\u00C1', '\u00C2', '\u0102', '\u00C4', '\u0139', '\u0106', '\u00C7',
+    '\u010C', '\u00C9', '\u0118', '\u00CB', '\u011A', '\u00CD', '\u00CE', '\u010E',
+    '\u0110', '\u0143', '\u0147', '\u00D3', '\u00D4', '\u0150', '\u00D6', '\u00D7',
+    '\u0158', '\u016E', '\u00DA', '\u0170', '\u00DC', '\u00DD', '\u0162', '\u00DF',
+    '\u0155', '\u00E1', '\u00E2', '\u0103', '\u00E4', '\u013A', '\u0107', '\u00E7',
+    '\u010D', '\u00E9', '\u0119', '\u00EB', '\u011B', '\u00ED', '\u00EE', '\u010F',
+    '\u0111', '\u0144', '\u0148', '\u00F3', '\u00F4', '\u0151', '\u00F6', '\u00F7',
+    '\u0159', '\u016F', '\u00FA', '\u0171', '\u00FC', '\u00FD', '\u0163', '\u02D9'
+)
+
+private val UI_DEC_ENTITY_REGEX = Regex("&#(\\d+);")
+private val UI_HEX_ENTITY_REGEX = Regex("&#[xX]([0-9a-fA-F]+);")
+
 private data class LiquidThemePalette(
     val isDark: Boolean,
     val bgGradient: List<Color>,
@@ -121,8 +143,29 @@ private fun getPalette(isDark: Boolean): LiquidThemePalette {
 
 private fun filterSongRds(isPlaying: Boolean, rawRds: String, stationName: String): String {
     if (!isPlaying) return ""
-    val clean = rawRds.trim()
+    var clean = rawRds.trim()
     if (clean.isEmpty()) return ""
+    if (clean.contains("&#")) {
+        clean = UI_DEC_ENTITY_REGEX.replace(clean) { m ->
+            val code = m.groupValues[1].toIntOrNull()
+            if (code != null && code in 32..0x10FFFF) code.toChar().toString() else m.value
+        }
+        clean = UI_HEX_ENTITY_REGEX.replace(clean) { m ->
+            val code = m.groupValues[1].toIntOrNull(16)
+            if (code != null && code in 32..0x10FFFF) code.toChar().toString() else m.value
+        }
+    }
+    if (clean.any { it.code in 0x80..0xFF && UI_WIN_1250_TABLE[it.code - 0x80] != it }) {
+        val sb = StringBuilder(clean.length)
+        for (ch in clean) {
+            if (ch.code in 0x80..0xFF) {
+                sb.append(UI_WIN_1250_TABLE[ch.code - 0x80])
+            } else {
+                sb.append(ch)
+            }
+        }
+        clean = sb.toString()
+    }
     if (clean.equals("Vyber stanici a stiskni Play", ignoreCase = true)) return ""
     if (clean.equals("Živé vysílání", ignoreCase = true)) return ""
     if (clean.endsWith("– živé vysílání", ignoreCase = true)) return ""
@@ -656,7 +699,6 @@ private fun PhoneRadioScreen(
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
-            // Horni lista: Stanice vlevo, RADIO PM uprostred, kvalita vpravo
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -727,7 +769,6 @@ private fun PhoneRadioScreen(
                 }
             }
 
-            // Hlavni panel stanice v puvodni velikosti s RDS oknem (prazdne pri zastaveni nebo bez nazvu skladby)
             GlassCardBox(
                 modifier = Modifier.fillMaxWidth(),
                 borderColor = if (isPlaying) palette.goldAccent.copy(alpha = 0.75f) else palette.cardBorder,
@@ -801,7 +842,6 @@ private fun PhoneRadioScreen(
                 }
             }
 
-            // 4 predvolby (2x2) bez nadpisu
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
@@ -881,7 +921,6 @@ private fun PhoneRadioScreen(
                 }
             }
 
-            // Hlavni tlacitko SPUSTIT / VYPNOUT RADIO pres celou sirku (bez bocnich tlacitek)
             val mainBtnColor by animateColorAsState(if (isPlaying) StopRed else PlayGreen)
             Box(
                 modifier = Modifier
@@ -902,7 +941,6 @@ private fun PhoneRadioScreen(
                 )
             }
 
-            // Spodni moduly: Casovac vypnuti, Predbuzeni a Copyright
             Column(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalAlignment = Alignment.CenterHorizontally,

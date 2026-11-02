@@ -3,6 +3,9 @@ name: Build & Publish KMP (Android + iOS)
 on:
   push:
     branches: [ "main", "master" ]
+    paths-ignore:
+      - "**.md"
+      - "**.html"
   workflow_dispatch:
 
 env:
@@ -47,6 +50,12 @@ jobs:
             fi
             curl -sfL -H "Authorization: Bearer $VAULT_TOKEN" -H "Accept: application/vnd.github.raw" \
               "https://api.github.com/repos/${OWNER}/ios-keys/contents/gplaykey.json.b64" -o "iosApp/signing/gplaykey.json.b64" || rm -f "iosApp/signing/gplaykey.json.b64"
+            for hf in huawei_key.json.b64 huaweikey.json.b64 agconnect_key.json.b64; do
+              if curl -sfL -H "Authorization: Bearer $VAULT_TOKEN" -H "Accept: application/vnd.github.raw" \
+                "https://api.github.com/repos/${OWNER}/ios-keys/contents/${hf}" -o "iosApp/signing/huawei_key.json.b64"; then
+                break
+              fi
+            done
           fi
 
       - name: Prepare Gradle Wrapper and Build Number
@@ -91,7 +100,7 @@ jobs:
         run: |
           if [ -f "composeApp/build.gradle.kts" ]; then
             sed -i "s/versionName = \"[0-9.]*\\.\$ciBuildNumber\"/versionName = \"${APP_VERSION}.\$ciBuildNumber\"/g" composeApp/build.gradle.kts || true
-            sed -i "s/versionName = \"[0-9.]*\\.\${ciBuildNumber}\"/versionName = \"${APP_VERSION}.\${ciBuildNumber}\"/g" composeApp/build.gradle.kts || true
+            sed -i "s/versionName = \"[0-9.]*\\.\\\${ciBuildNumber}\"/versionName = \"${APP_VERSION}.\\\${ciBuildNumber}\"/g" composeApp/build.gradle.kts || true
           fi
           ./gradlew :composeApp:bundleRelease :composeApp:assembleRelease
           BUILD_NUM="${PROJECT_BUILD_NUMBER}"
@@ -107,12 +116,12 @@ jobs:
             composeApp/build/outputs/apk/release/*.apk
             composeApp/build/outputs/bundle/release/*.aab
 
-      - name: Publish Android AAB to Google Play
+      - name: Publish Android AAB to Google Play (Internal Testing)
         run: |
           if [ "$PUBLISH_TO_STORES" != "true" ]; then
             echo "Publikace do obchodu je vypnuta (PUBLISH_TO_STORES=false). Preskakuji Google Play upload."
           elif [ -s "iosApp/signing/gplaykey.json.b64" ]; then
-            echo "Nalezen Google Play klic, dekoduji a nahravam do Google Play..."
+            echo "Nalezen Google Play klic, dekoduji a nahravam do Google Play (Interni testovani)..."
             base64 --decode < iosApp/signing/gplaykey.json.b64 > /tmp/gplay_key.json
             pip3 install --quiet --break-system-packages google-api-python-client google-auth-httplib2 google-auth-oauthlib || \
             pip3 install --quiet google-api-python-client google-auth-httplib2 google-auth-oauthlib
@@ -150,6 +159,22 @@ jobs:
               version_code = bundle_response["versionCode"]
               print(f"AAB uspesne nahrano (versionCode: {version_code}).")
 
+              def commit_edit(eid):
+                  try:
+                      service.edits().commit(editId=eid, packageName=package_name).execute(num_retries=5)
+                      print("Publikace do Google Play (Interni testovani) uspesne dokoncena!")
+                  except Exception as cerr:
+                      err_str = str(cerr)
+                      if "Only releases with status draft" in err_str:
+                          raise cerr
+                      print(f"Standardni commit vyzaduje rucni potvrzeni v konzoli ({cerr}), ukladam s changesNotSentForReview=True...")
+                      service.edits().commit(
+                          editId=eid,
+                          packageName=package_name,
+                          changesNotSentForReview=True
+                      ).execute(num_retries=5)
+                      print("Publikace ulozena do Google Play (changesNotSentForReview=True)! Staci ji potvrdit v Prehledu publikovani.")
+
               try:
                   service.edits().tracks().update(
                       editId=edit_id,
@@ -158,8 +183,9 @@ jobs:
                       body={"releases": [{"versionCodes": [str(version_code)], "status": "completed"}]}
                   ).execute(num_retries=5)
                   print("Prirazeno do kanalu internal (completed).")
+                  commit_edit(edit_id)
               except Exception as track_err:
-                  print(f"Upozorneni (pravdepodobne draft aplikace): {track_err}. Ukladam jako draft...")
+                  print(f"Aplikace je v Google Play v rezimu draft ({track_err}). Prepinam vydani v kanalu internal na status draft...")
                   service.edits().tracks().update(
                       editId=edit_id,
                       track="internal",
@@ -167,18 +193,7 @@ jobs:
                       body={"releases": [{"versionCodes": [str(version_code)], "status": "draft"}]}
                   ).execute(num_retries=5)
                   print("Prirazeno do kanalu internal jako draft.")
-
-              try:
-                  service.edits().commit(editId=edit_id, packageName=package_name).execute(num_retries=5)
-                  print("Publikace do Google Play uspesne dokoncena!")
-              except Exception as commit_err:
-                  print(f"Standardni commit vyzaduje rucni potvrzeni v konzoli ({commit_err}), ukladam s changesNotSentForReview=True...")
-                  service.edits().commit(
-                      editId=edit_id,
-                      packageName=package_name,
-                      changesNotSentForReview=True
-                  ).execute(num_retries=5)
-                  print("Publikace ulozena do Google Play (changesNotSentForReview=True)! Staci ji potvrdit v Prehledu publikovani.")
+                  commit_edit(edit_id)
           except HttpError as e:
               if e.resp.status == 404:
                   print(f"UPOZORNENI: Balicek '{package_name}' zatim v Google Play Console neexistuje (404 Package not found).")
@@ -190,6 +205,99 @@ jobs:
           EOF
           else
             echo "Google Play klic nebyl nalezen, preskakuji Google Play upload."
+          fi
+
+      - name: Publish Android APK to Huawei AppGallery Connect
+        run: |
+          if [ "$PUBLISH_TO_STORES" != "true" ]; then
+            echo "Publikace do obchodu je vypnuta (PUBLISH_TO_STORES=false). Preskakuji Huawei AppGallery upload."
+          elif [ -s "iosApp/signing/huawei_key.json.b64" ]; then
+            echo "Nalezen Huawei AppGallery klic, dekoduji a nahravam .apk do Huawei AppGallery Connect..."
+            base64 --decode < iosApp/signing/huawei_key.json.b64 > /tmp/huawei_key.json
+            pip3 install --quiet --break-system-packages requests || pip3 install --quiet requests
+
+            python3 - << 'EOF'
+          import os, sys, json, requests
+
+          package_name = os.environ.get("BUNDLE_ID", "").strip()
+          build_num = os.environ.get("PROJECT_BUILD_NUMBER", "101").strip()
+          app_name = os.environ.get("APP_NAME", "").strip()
+          app_version = os.environ.get("APP_VERSION", "1.0").strip()
+          apk_path = f"composeApp/build/outputs/apk/release/{app_name}-{app_version}.{build_num}.apk"
+
+          try:
+              with open("/tmp/huawei_key.json", "r", encoding="utf-8") as f:
+                  cfg = json.load(f)
+              client_id = str(cfg.get("client_id") or cfg.get("clientId") or "").strip()
+              client_secret = str(cfg.get("client_secret") or cfg.get("clientSecret") or "").strip()
+              if not client_id or not client_secret:
+                  print("UPOZORNENI: V Huawei JSON klici chybi client_id nebo client_secret.")
+                  sys.exit(0)
+
+              base_url = "https://connect-api.cloud.huawei.com/api"
+              tok_res = requests.post(
+                  f"{base_url}/oauth2/v1/token",
+                  json={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
+                  timeout=30
+              )
+              if not tok_res.ok or "access_token" not in tok_res.json():
+                  print(f"UPOZORNENI: Nepodarilo se ziskat Huawei OAuth token ({tok_res.status_code}): {tok_res.text}")
+                  sys.exit(0)
+
+              access_token = tok_res.json()["access_token"]
+              headers = {"client_id": client_id, "Authorization": f"Bearer {access_token}"}
+
+              info_res = requests.get(
+                  f"{base_url}/publish/v2/app-info",
+                  params={"packageName": package_name},
+                  headers=headers,
+                  timeout=30
+              )
+              info_json = info_res.json() if info_res.ok else {}
+              ret_code = info_json.get("ret", {}).get("code", -1)
+              app_id = str(info_json.get("appInfo", {}).get("appId") or "").strip()
+
+              if ret_code != 0 or not app_id:
+                  print(f"UPOZORNENI: Balicek '{package_name}' zatim v Huawei AppGallery Connect neexistuje ({info_json.get('ret', info_res.text)}).")
+                  print("Zaloz aplikaci v Huawei AppGallery Connect pod timto nazvem balicku a spust build znovu.")
+                  sys.exit(0)
+
+              print(f"Nalezena Huawei aplikace (appId: {app_id}). Ziskavam upload URL pro APK...")
+              file_size = os.path.getsize(apk_path)
+              file_name = os.path.basename(apk_path)
+
+              url_res = requests.get(
+                  f"{base_url}/publish/v2/upload-url/for-obs",
+                  params={"appId": app_id, "suffix": "apk", "contentLength": file_size, "fileName": file_name},
+                  headers=headers,
+                  timeout=30
+              )
+              url_json = url_res.json() if url_res.ok else {}
+              if "urlInfo" in url_json:
+                  u_info = url_json["urlInfo"]
+                  upload_url = u_info["url"]
+                  put_headers = u_info.get("headers", {})
+                  object_id = u_info.get("objectId", "")
+                  with open(apk_path, "rb") as apk_f:
+                      up_res = requests.put(upload_url, data=apk_f, headers=put_headers, timeout=300)
+                  if up_res.ok:
+                      upd_res = requests.put(
+                          f"{base_url}/publish/v2/app-file-info",
+                          params={"appId": app_id},
+                          headers=headers,
+                          json={"fileType": 5, "files": [{"fileName": file_name, "fileDestUrl": object_id, "size": str(file_size)}]},
+                          timeout=60
+                      )
+                      print(f"APK uspesne nahrano do Huawei AppGallery Connect ({upd_res.status_code}: {upd_res.text})!")
+                  else:
+                      print(f"UPOZORNENI: Chyba pri uploadu APK do Huawei OBS ({up_res.status_code}): {up_res.text}")
+              else:
+                  print(f"UPOZORNENI: Huawei upload-url odpoved: {url_res.status_code} {url_res.text}")
+          except Exception as e:
+              print(f"UPOZORNENI: Chyba pri komunikaci s Huawei AppGallery Connect: {e}")
+          EOF
+          else
+            echo "Huawei AppGallery klic nebyl nalezen, preskakuji Huawei upload."
           fi
 
   build-ios:
@@ -244,103 +352,6 @@ jobs:
 
           if ! command -v xcodegen &> /dev/null; then
             HOMEBREW_NO_AUTO_UPDATE=1 brew install xcodegen
-          fi
-
-          mkdir -p iosApp/iosApp/Assets.xcassets/AppIcon.appiconset
-          cat << 'EOF' > iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/Contents.json
-          {
-            "images" : [
-              {
-                "filename" : "app-icon-1024.png",
-                "idiom" : "universal",
-                "platform" : "ios",
-                "size" : "1024x1024"
-              }
-            ],
-            "info" : {
-              "author" : "xcode",
-              "version" : 1
-            }
-          }
-          EOF
-
-          if [ ! -f "iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/app-icon-1024.png" ]; then
-            python3 - << 'EOF'
-          import zlib, struct
-          w, h = 1024, 1024
-          raw = bytearray()
-          for y in range(h):
-              raw.append(0)
-              raw.extend(b'\x1e\x29\x3b' * w)
-          def chunk(t, d):
-              return struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d) & 0xffffffff)
-          png = b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0)) + chunk(b'IDAT', zlib.compress(bytes(raw), 6)) + chunk(b'IEND', b'')
-          with open('iosApp/iosApp/Assets.xcassets/AppIcon.appiconset/app-icon-1024.png', 'wb') as f:
-              f.write(png)
-          EOF
-          fi
-
-          if [ ! -f "iosApp/iosApp/Info.plist" ]; then
-            cat << 'EOF' > iosApp/iosApp/Info.plist
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleDevelopmentRegion</key>
-            <string>cs</string>
-            <key>CFBundleExecutable</key>
-            <string>$(EXECUTABLE_NAME)</string>
-            <key>CFBundleIdentifier</key>
-            <string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
-            <key>CFBundleInfoDictionaryVersion</key>
-            <string>6.0</string>
-            <key>CFBundleName</key>
-            <string>$(PRODUCT_NAME)</string>
-            <key>CFBundlePackageType</key>
-            <string>APPL</string>
-            <key>CFBundleShortVersionString</key>
-            <string>$(MARKETING_VERSION)</string>
-            <key>CFBundleVersion</key>
-            <string>$(CURRENT_PROJECT_VERSION)</string>
-            <key>LSRequiresIPhoneOS</key>
-            <true/>
-            <key>CADisableMinimumFrameDurationOnPhone</key>
-            <true/>
-            <key>ITSAppUsesNonExemptEncryption</key>
-            <false/>
-            <key>UIApplicationSceneManifest</key>
-            <dict>
-              <key>UIApplicationSupportsMultipleScenes</key>
-              <false/>
-            </dict>
-            <key>UILaunchScreen</key>
-            <dict/>
-            <key>UIRequiresFullScreen</key>
-            <true/>
-            <key>UISupportedInterfaceOrientations</key>
-            <array>
-              <string>UIInterfaceOrientationPortrait</string>
-              <string>UIInterfaceOrientationPortraitUpsideDown</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-            </array>
-            <key>UISupportedInterfaceOrientations~ipad</key>
-            <array>
-              <string>UIInterfaceOrientationPortrait</string>
-              <string>UIInterfaceOrientationPortraitUpsideDown</string>
-              <string>UIInterfaceOrientationLandscapeLeft</string>
-              <string>UIInterfaceOrientationLandscapeRight</string>
-            </array>
-          </dict>
-          </plist>
-          EOF
-          else
-            plutil -replace CFBundleExecutable -string '$(EXECUTABLE_NAME)' iosApp/iosApp/Info.plist || true
-            plutil -replace CFBundleIdentifier -string '$(PRODUCT_BUNDLE_IDENTIFIER)' iosApp/iosApp/Info.plist || true
-            plutil -replace CFBundleName -string '$(PRODUCT_NAME)' iosApp/iosApp/Info.plist || true
-            plutil -replace CFBundlePackageType -string 'APPL' iosApp/iosApp/Info.plist || true
-            plutil -replace CFBundleShortVersionString -string '$(MARKETING_VERSION)' iosApp/iosApp/Info.plist || true
-            plutil -replace CFBundleVersion -string '$(CURRENT_PROJECT_VERSION)' iosApp/iosApp/Info.plist || true
           fi
 
           FW_PATH="$(pwd)/composeApp/build/bin/iosArm64/releaseFramework"
@@ -467,220 +478,83 @@ jobs:
             -exportOptionsPlist "$HOME/export_options.plist"
 
           if [ "$PUBLISH_TO_STORES" = "true" ]; then
-            echo "Nahravam .ipa do Apple App Store Connect (TestFlight)..."
-            app-store-connect publish \
-              --path build/ios/ipa/*.ipa \
-              --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
-              --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
-              --private-key "@file:/tmp/AuthKey.p8"
+            MAX_PUB_ATTEMPTS=5
+            PUB_ATTEMPT=1
+            APP_NOT_IN_ASC=0
+            while [ $PUB_ATTEMPT -le $MAX_PUB_ATTEMPTS ]; do
+              echo "Pokus $PUB_ATTEMPT/$MAX_PUB_ATTEMPTS: Nahravam .ipa (verze $APP_VERSION) do Apple App Store Connect (TestFlight)..."
+              set +e
+              app-store-connect publish \
+                --path build/ios/ipa/*.ipa \
+                --key-id "$APP_STORE_CONNECT_KEY_IDENTIFIER" \
+                --issuer-id "$APP_STORE_CONNECT_ISSUER_ID" \
+                --private-key "@file:/tmp/AuthKey.p8" 2>&1 | tee /tmp/asc_publish.log
+              PUB_EXIT=${PIPESTATUS[0]}
+              set -e
 
-            echo "Kontroluji stav v App Store Connect (uklid prazdnych Draft Submissions a kontrola Waiting for Review)..."
-            pip3 install --quiet --break-system-packages pyjwt cryptography requests || \
-            pip3 install --quiet pyjwt cryptography requests
+              if [ $PUB_EXIT -eq 0 ]; then
+                echo "Upload .ipa (verze $APP_VERSION) uspesne dokoncen!"
+                break
+              fi
 
-            python3 - << 'EOF'
-          import os, sys, time, jwt, requests
+              if grep -qE "Cannot determine the Apple ID from Bundle ID|No suitable application records were found" /tmp/asc_publish.log; then
+                echo "UPOZORNENI: Aplikace s Bundle ID '$BUNDLE_ID' zatim neni v App Store Connect zalozena."
+                echo "Zaloz v App Store Connect novou aplikaci (Apps -> + -> New App) s Bundle ID '$BUNDLE_ID' a spust build znovu."
+                APP_NOT_IN_ASC=1
+                break
+              fi
 
-          key_id = os.environ.get("APP_STORE_CONNECT_KEY_IDENTIFIER", "").strip()
-          issuer_id = os.environ.get("APP_STORE_CONNECT_ISSUER_ID", "").strip()
-          bundle_id = os.environ.get("BUNDLE_ID", "").strip()
-          build_num = os.environ.get("PROJECT_BUILD_NUMBER", "101").strip()
-          key_path = "/tmp/AuthKey.p8"
+              if grep -qE "90062|90186|closed for new build submissions|must contain a higher version" /tmp/asc_publish.log; then
+                if [ $PUB_ATTEMPT -eq $MAX_PUB_ATTEMPTS ]; then
+                  echo "Nepodarilo se najit volnou verzi ani po $MAX_PUB_ATTEMPTS pokusech."
+                  exit 1
+                fi
+                NEW_VER=$(python3 - << 'PYEOF'
+          import re, os
+          log_txt = open("/tmp/asc_publish.log", "r", errors="ignore").read()
+          cur = os.environ.get("APP_VERSION", "1.0").strip()
+          matches = re.findall(r"previously approved version \[([0-9.]+)\]|train version '([0-9.]+)'", log_txt)
+          base = cur
+          for g1, g2 in matches:
+              v = g1 or g2
+              if v:
+                  base = v
+          def parse_v(s):
+              parts = [int(x) for x in s.split(".") if x.isdigit()]
+              while len(parts) < 2:
+                  parts.append(0)
+              return parts
+          p_cur = parse_v(cur)
+          p_base = parse_v(base)
+          target = list(p_base if p_base >= p_cur else p_cur)
+          target[-1] += 1
+          print(".".join(str(x) for x in target))
+          PYEOF
+                )
+                NEW_VER=$(echo "$NEW_VER" | tr -d '\r\n ')
+                echo "Verze $APP_VERSION je v App Store uzavrena (90062/90186). Automaticky zvysuji verzi na $NEW_VER a prebaluji .ipa..."
+                export APP_VERSION="$NEW_VER"
+                echo "APP_VERSION=$NEW_VER" >> $GITHUB_ENV
 
-          if not key_id or not issuer_id or not os.path.exists(key_path):
-              print("Chybi udaje Apple API klice pro kontrolu stavu v App Store Connect.")
-              sys.exit(0)
+                plutil -replace ApplicationProperties.CFBundleShortVersionString -string "$NEW_VER" build/ios/xcarchive/iosApp.xcarchive/Info.plist || true
+                for app_plist in build/ios/xcarchive/iosApp.xcarchive/Products/Applications/*.app/Info.plist; do
+                  if [ -f "$app_plist" ]; then
+                    plutil -replace CFBundleShortVersionString -string "$NEW_VER" "$app_plist" || true
+                  fi
+                done
 
-          with open(key_path, "r") as f:
-              private_key = f.read()
+                rm -rf build/ios/ipa/*.ipa
+                xcodebuild -exportArchive \
+                  -archivePath build/ios/xcarchive/iosApp.xcarchive \
+                  -exportPath build/ios/ipa \
+                  -exportOptionsPlist "$HOME/export_options.plist"
 
-          def get_headers():
-              now = int(time.time())
-              payload = {
-                  "iss": issuer_id,
-                  "iat": now - 30,
-                  "exp": now + 1100,
-                  "aud": "appstoreconnect-v1"
-              }
-              token = jwt.encode(payload, private_key, algorithm="ES256", headers={"kid": key_id, "typ": "JWT"})
-              if isinstance(token, bytes):
-                  token = token.decode("utf-8")
-              return {
-                  "Authorization": f"Bearer {token}",
-                  "Content-Type": "application/json"
-              }
-
-          base_url = "https://api.appstoreconnect.apple.com/v1"
-
-          try:
-              r = requests.get(f"{base_url}/apps", params={"filter[bundleId]": bundle_id}, headers=get_headers(), timeout=30)
-              apps = r.json().get("data", []) if r.ok else []
-              if not apps:
-                  print(f"Aplikace s Bundle ID '{bundle_id}' zatim v App Store Connect neni zalozena. Build je nahrany v TestFlightu.")
-                  sys.exit(0)
-              app_id = apps[0]["id"]
-
-              def cleanup_empty_draft_submissions():
-                  sub_res = requests.get(
-                      f"{base_url}/reviewSubmissions",
-                      params={"filter[app]": app_id, "filter[state]": "READY_FOR_REVIEW,UNRESOLVED_ISSUES"},
-                      headers=get_headers(),
-                      timeout=30
-                  )
-                  if not sub_res.ok:
-                      return
-                  for sub in sub_res.json().get("data", []):
-                      sub_id = sub["id"]
-                      items_res = requests.get(f"{base_url}/reviewSubmissions/{sub_id}/items", headers=get_headers(), timeout=30)
-                      items = items_res.json().get("data", []) if items_res.ok else []
-                      if len(items) == 0:
-                          print(f"Mazu prazdny visici Draft Submission ({sub_id})...")
-                          cancel_body = {
-                              "data": {
-                                  "type": "reviewSubmissions",
-                                  "id": sub_id,
-                                  "attributes": {"canceled": True}
-                              }
-                          }
-                          requests.patch(f"{base_url}/reviewSubmissions/{sub_id}", json=cancel_body, headers=get_headers(), timeout=30)
-
-              cleanup_empty_draft_submissions()
-
-              ver_res = requests.get(
-                  f"{base_url}/apps/{app_id}/appStoreVersions",
-                  params={"filter[platform]": "IOS"},
-                  headers=get_headers(),
-                  timeout=30
-              )
-              versions = ver_res.json().get("data", []) if ver_res.ok else []
-              if not versions:
-                  print("V App Store Connect nebyla nalezena zadna iOS verze.")
-                  sys.exit(0)
-
-              target_version = versions[0]
-              version_id = target_version["id"]
-              attrs = target_version.get("attributes", {})
-              state = attrs.get("appStoreState") or attrs.get("appVersionState") or ""
-              ver_str = attrs.get("versionString", "1.0")
-              print(f"Nalezena iOS verze {ver_str} (ID: {version_id}) ve stavu: {state}")
-
-              waiting_states = {
-                  "WAITING_FOR_REVIEW",
-                  "IN_REVIEW",
-                  "PENDING_DEVELOPER_RELEASE",
-                  "PENDING_APPLE_RELEASE",
-                  "PROCESSING_FOR_APP_STORE",
-                  "READY_FOR_SALE"
-              }
-              if state in waiting_states:
-                  print(f"Aplikace uz je ve stavu '{state}'. Nezakladam novou zadost ke schvaleni a ponechavam aktualni stav.")
-                  cleanup_empty_draft_submissions()
-                  sys.exit(0)
-
-              editable_states = {
-                  "PREPARE_FOR_SUBMISSION",
-                  "DEVELOPER_REJECTED",
-                  "REJECTED",
-                  "METADATA_REJECTED",
-                  "INVALID_BINARY"
-              }
-              if state in editable_states:
-                  valid_build_id = None
-                  print(f"Hledam zpracovany build {build_num} pro prirazeni k verzi {ver_str}...")
-                  for attempt in range(1, 13):
-                      b_res = requests.get(
-                          f"{base_url}/builds",
-                          params={"filter[app]": app_id, "filter[version]": build_num},
-                          headers=get_headers(),
-                          timeout=30
-                      )
-                      builds = b_res.json().get("data", []) if b_res.ok else []
-                      if builds:
-                          b_state = builds[0].get("attributes", {}).get("processingState", "")
-                          if b_state == "VALID":
-                              valid_build_id = builds[0]["id"]
-                              print(f"Build {build_num} je zpracovany a platny (VALID).")
-                              break
-                          print(f"Pokus {attempt}/12: Build {build_num} se v Applu zpracovava ({b_state}), cekam 15 s...")
-                      else:
-                          print(f"Pokus {attempt}/12: Build {build_num} se v seznamu zatim neobjevil, cekam 15 s...")
-                      time.sleep(15)
-
-                  if valid_build_id:
-                      rel_body = {"data": {"type": "builds", "id": valid_build_id}}
-                      rel_res = requests.patch(
-                          f"{base_url}/appStoreVersions/{version_id}/relationships/build",
-                          json=rel_body,
-                          headers=get_headers(),
-                          timeout=30
-                      )
-                      if rel_res.ok:
-                          print(f"Build {build_num} byl prirazen k iOS verzi {ver_str}.")
-                      else:
-                          print(f"Upozorneni pri prirazovani buildu: {rel_res.status_code} {rel_res.text}")
-
-                  cleanup_empty_draft_submissions()
-
-                  create_sub_body = {
-                      "data": {
-                          "type": "reviewSubmissions",
-                          "attributes": {"platform": "IOS"},
-                          "relationships": {
-                              "app": {"data": {"type": "apps", "id": app_id}}
-                          }
-                      }
-                  }
-                  sub_create_res = requests.post(f"{base_url}/reviewSubmissions", json=create_sub_body, headers=get_headers(), timeout=30)
-                  if sub_create_res.ok:
-                      new_sub_id = sub_create_res.json()["data"]["id"]
-                      item_body = {
-                          "data": {
-                              "type": "reviewSubmissionItems",
-                              "relationships": {
-                                  "reviewSubmission": {"data": {"type": "reviewSubmissions", "id": new_sub_id}},
-                                  "appStoreVersion": {"data": {"type": "appStoreVersions", "id": version_id}}
-                              }
-                          }
-                      }
-                      item_res = requests.post(f"{base_url}/reviewSubmissionItems", json=item_body, headers=get_headers(), timeout=30)
-                      if item_res.ok:
-                          submit_body = {
-                              "data": {
-                                  "type": "reviewSubmissions",
-                                  "id": new_sub_id,
-                                  "attributes": {"submitted": True}
-                              }
-                          }
-                          submit_res = requests.patch(f"{base_url}/reviewSubmissions/{new_sub_id}", json=submit_body, headers=get_headers(), timeout=30)
-                          if submit_res.ok:
-                              print(f"Verze {ver_str} byla uspesne odeslana ke schvaleni (Waiting for Review)!")
-                          else:
-                              print(f"Verzi nelze automaticky odeslat ke schvaleni (pravdepodobne chybi metadata/snimky): {submit_res.status_code}. Uklizim rozpracovany Draft Submission...")
-                              item_id = item_res.json().get("data", {}).get("id")
-                              if item_id:
-                                  requests.delete(f"{base_url}/reviewSubmissionItems/{item_id}", headers=get_headers(), timeout=30)
-                              cancel_body = {
-                                  "data": {
-                                      "type": "reviewSubmissions",
-                                      "id": new_sub_id,
-                                      "attributes": {"canceled": True}
-                                  }
-                              }
-                              requests.patch(f"{base_url}/reviewSubmissions/{new_sub_id}", json=cancel_body, headers=get_headers(), timeout=30)
-                      else:
-                          print(f"Verzi nelze vlozit do zadosti ({item_res.status_code}). Uklizim prazdny Draft Submission...")
-                          cancel_body = {
-                              "data": {
-                                  "type": "reviewSubmissions",
-                                  "id": new_sub_id,
-                                  "attributes": {"canceled": True}
-                              }
-                          }
-                          requests.patch(f"{base_url}/reviewSubmissions/{new_sub_id}", json=cancel_body, headers=get_headers(), timeout=30)
-                  cleanup_empty_draft_submissions()
-          except Exception as e:
-              print(f"Upozorneni pri komunikaci s App Store Connect API: {e}")
-          EOF
+                PUB_ATTEMPT=$((PUB_ATTEMPT + 1))
+              else
+                echo "Chyba pri nahravani .ipa do App Store Connect (kod $PUB_EXIT)."
+                exit $PUB_EXIT
+              fi
+            done
           else
             echo "Publikace do obchodu je vypnuta (PUBLISH_TO_STORES=false). Preskakuji TestFlight upload."
           fi

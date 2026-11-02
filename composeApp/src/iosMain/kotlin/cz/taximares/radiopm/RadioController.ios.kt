@@ -46,6 +46,17 @@ actual fun decodeByteArrayToImageBitmap(bytes: ByteArray): ImageBitmap? {
     }
 }
 
+private class IosParsedStreamItem(
+    val streamUrl: String,
+    val bitrate: Int,
+    val favicon: String
+)
+
+private class IosStationGroupBucket(
+    val name: String,
+    val items: MutableList<IosParsedStreamItem> = mutableListOf()
+)
+
 @OptIn(ExperimentalForeignApi::class)
 actual object RadioController {
     private const val KEY_LAST_STATION_ID = "last_station_id"
@@ -95,11 +106,13 @@ actual object RadioController {
     private val _currentStation = MutableStateFlow(defaultCzechStations.first())
     actual val currentStation: StateFlow<RadioStation> = _currentStation.asStateFlow()
 
-    private val _presets = MutableStateFlow<List<RadioStation?>>(List(4) { null })
+    private val initialPresetsList: List<RadioStation?> = List(4) { null }
+    private val _presets = MutableStateFlow(initialPresetsList)
     actual val presets: StateFlow<List<RadioStation?>> = _presets.asStateFlow()
 
-    private val _stationIcons = MutableStateFlow>(emptyMap())
-    actual val stationIcons: StateFlow> = _stationIcons.asStateFlow()
+    private val initialIconsMap: kotlin.collections.Map<String, ByteArray> = emptyMap()
+    private val _stationIcons = MutableStateFlow(initialIconsMap)
+    actual val stationIcons: StateFlow<kotlin.collections.Map<String, ByteArray>> = _stationIcons.asStateFlow()
 
     private val _isUpdatingStations = MutableStateFlow(false)
     actual val isUpdatingStations: StateFlow<Boolean> = _isUpdatingStations.asStateFlow()
@@ -288,10 +301,11 @@ actual object RadioController {
             null
         } ?: return emptyList()
 
-        val grouped = LinkedHashMap<String, MutableList<Triple<String, Int, String>>>()
+        val buckets = mutableListOf<IosStationGroupBucket>()
+        val bucketIndexByName = mutableListOf<Pair<String, Int>>()
 
         for (element in jsonArray) {
-            val obj = element as? Map<*, *> ?: continue
+            val obj = element as? kotlin.collections.Map<*, *> ?: continue
             val name = (obj["name"] as? String)?.trim().orEmpty()
             val urlResolved = (obj["url_resolved"] as? String)?.trim().orEmpty()
             val urlOrig = (obj["url"] as? String)?.trim().orEmpty()
@@ -310,40 +324,48 @@ actual object RadioController {
             }
 
             val cleanName = cleanStationGroupName(name)
-            val list = grouped.getOrPut(cleanName) { mutableListOf() }
-            list.add(Triple(streamUrl, bitrate, favicon))
+            val existingIdx = bucketIndexByName.firstOrNull { it.first.equals(cleanName, ignoreCase = true) }?.second
+            val bucket = if (existingIdx != null) {
+                buckets[existingIdx]
+            } else {
+                val newBucket = IosStationGroupBucket(cleanName)
+                bucketIndexByName.add(cleanName to buckets.size)
+                buckets.add(newBucket)
+                newBucket
+            }
+            bucket.items.add(IosParsedStreamItem(streamUrl, bitrate, favicon))
         }
 
         val result = mutableListOf<RadioStation>()
         var stationCounter = 0
-        for ((name, streams) in grouped) {
+        for (bucket in buckets) {
             stationCounter++
-            val uniqueStreams = streams.distinctBy { it.first }
-            val sorted = uniqueStreams.sortedByDescending { it.second }
+            val uniqueStreams = bucket.items.distinctBy { it.streamUrl }
+            val sorted = uniqueStreams.sortedByDescending { it.bitrate }
             val primary = sorted.first()
-            val backup = sorted.getOrNull(1)?.first ?: ""
-            val icon = sorted.firstOrNull { it.third.isNotEmpty() }?.third ?: ""
+            val backup = sorted.getOrNull(1)?.streamUrl ?: ""
+            val icon = sorted.firstOrNull { it.favicon.isNotEmpty() }?.favicon ?: ""
 
-            val variants = sorted.mapIndexed { idx, triple ->
-                val br = triple.second
-                val label = if (sorted.count { it.second == br } > 1) {
+            val variants = sorted.mapIndexed { idx, item ->
+                val br = item.bitrate
+                val label = if (sorted.count { it.bitrate == br } > 1) {
                     "${br} kbps (#${idx + 1})"
                 } else {
                     "${br} kbps"
                 }
-                StreamVariant(label = label, url = triple.first, bitrate = br)
+                StreamVariant(label = label, url = item.streamUrl, bitrate = br)
             }
 
-            val slug = name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
+            val slug = bucket.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
             val id = if (slug.isNotEmpty()) "online_$slug" else "online_st_$stationCounter"
             result.add(
                 RadioStation(
                     id = id,
-                    name = name,
-                    streamUrl = primary.first,
+                    name = bucket.name,
+                    streamUrl = primary.streamUrl,
                     backupUrl = backup,
                     faviconUrl = icon,
-                    qualityLabel = "${primary.second} kbps",
+                    qualityLabel = "${primary.bitrate} kbps",
                     variants = variants
                 )
             )
@@ -385,6 +407,14 @@ actual object RadioController {
         return result
     }
 
+    private fun mapWin1250IfInLatin1Range(codePoint: Int): Char {
+        return if (codePoint in 0x80..0xFF) {
+            WINDOWS_1250_TABLE[codePoint - 0x80]
+        } else {
+            codePoint.toChar()
+        }
+    }
+
     private fun decodeCzechRdsBytes(bytes: ByteArray): String {
         if (bytes.isEmpty()) return ""
         val sb = StringBuilder(bytes.size)
@@ -400,7 +430,7 @@ actual object RadioController {
                 val b1 = bytes[i + 1].toInt() and 0xFF
                 if ((b1 and 0xC0) == 0x80) {
                     val cp = ((b0 and 0x1F) shl 6) or (b1 and 0x3F)
-                    sb.append(cp.toChar())
+                    sb.append(mapWin1250IfInLatin1Range(cp))
                     i += 2
                 } else {
                     sb.append(WINDOWS_1250_TABLE[b0 - 0x80])
@@ -411,7 +441,7 @@ actual object RadioController {
                 val b2 = bytes[i + 2].toInt() and 0xFF
                 if ((b1 and 0xC0) == 0x80 && (b2 and 0xC0) == 0x80) {
                     val cp = ((b0 and 0x0F) shl 12) or ((b1 and 0x3F) shl 6) or (b2 and 0x3F)
-                    sb.append(cp.toChar())
+                    sb.append(mapWin1250IfInLatin1Range(cp))
                     i += 3
                 } else {
                     sb.append(WINDOWS_1250_TABLE[b0 - 0x80])
@@ -494,6 +524,26 @@ actual object RadioController {
         return s
     }
 
+    private fun remapResidualLatin1ToWin1250(input: String): String {
+        var needsRemap = false
+        for (ch in input) {
+            if (ch.code in 0x80..0xFF && WINDOWS_1250_TABLE[ch.code - 0x80] != ch) {
+                needsRemap = true
+                break
+            }
+        }
+        if (!needsRemap) return input
+        val sb = StringBuilder(input.length)
+        for (ch in input) {
+            if (ch.code in 0x80..0xFF) {
+                sb.append(WINDOWS_1250_TABLE[ch.code - 0x80])
+            } else {
+                sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
     private fun cleanAndRepairCzechText(input: String): String {
         if (input.isEmpty()) return ""
         var s = input
@@ -514,6 +564,7 @@ actual object RadioController {
             .replace("Ĺľ", "ž").replace("Ĺ˝", "Ž")
 
         s = decodeHtmlEntities(s)
+        s = remapResidualLatin1ToWin1250(s)
 
         if (s.contains('\uFFFD')) {
             s = repairServerReplacementChars(s)

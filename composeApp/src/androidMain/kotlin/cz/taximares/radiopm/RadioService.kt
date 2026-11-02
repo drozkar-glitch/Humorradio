@@ -320,6 +320,14 @@ class RadioService : Service() {
         mediaSession = session
     }
 
+    private fun mapWin1250IfInLatin1Range(codePoint: Int): Char {
+        return if (codePoint in 0x80..0xFF) {
+            WINDOWS_1250_TABLE[codePoint - 0x80]
+        } else {
+            codePoint.toChar()
+        }
+    }
+
     private fun decodeCzechRdsBytes(bytes: ByteArray): String {
         if (bytes.isEmpty()) return ""
         val sb = StringBuilder(bytes.size)
@@ -335,7 +343,7 @@ class RadioService : Service() {
                 val b1 = bytes[i + 1].toInt() and 0xFF
                 if ((b1 and 0xC0) == 0x80) {
                     val cp = ((b0 and 0x1F) shl 6) or (b1 and 0x3F)
-                    sb.append(cp.toChar())
+                    sb.append(mapWin1250IfInLatin1Range(cp))
                     i += 2
                 } else {
                     sb.append(WINDOWS_1250_TABLE[b0 - 0x80])
@@ -346,7 +354,7 @@ class RadioService : Service() {
                 val b2 = bytes[i + 2].toInt() and 0xFF
                 if ((b1 and 0xC0) == 0x80 && (b2 and 0xC0) == 0x80) {
                     val cp = ((b0 and 0x0F) shl 12) or ((b1 and 0x3F) shl 6) or (b2 and 0x3F)
-                    sb.append(cp.toChar())
+                    sb.append(mapWin1250IfInLatin1Range(cp))
                     i += 3
                 } else {
                     sb.append(WINDOWS_1250_TABLE[b0 - 0x80])
@@ -463,6 +471,26 @@ class RadioService : Service() {
         return s
     }
 
+    private fun remapResidualLatin1ToWin1250(input: String): String {
+        var needsRemap = false
+        for (ch in input) {
+            if (ch.code in 0x80..0xFF && WINDOWS_1250_TABLE[ch.code - 0x80] != ch) {
+                needsRemap = true
+                break
+            }
+        }
+        if (!needsRemap) return input
+        val sb = StringBuilder(input.length)
+        for (ch in input) {
+            if (ch.code in 0x80..0xFF) {
+                sb.append(WINDOWS_1250_TABLE[ch.code - 0x80])
+            } else {
+                sb.append(ch)
+            }
+        }
+        return sb.toString()
+    }
+
     private fun cleanAndRepairCzechText(input: String): String {
         if (input.isEmpty()) return ""
         var s = input
@@ -483,6 +511,7 @@ class RadioService : Service() {
             .replace("Ĺľ", "ž").replace("Ĺ˝", "Ž")
 
         s = decodeHtmlEntities(s)
+        s = remapResidualLatin1ToWin1250(s)
 
         if (s.contains('\uFFFD')) {
             s = repairServerReplacementChars(s)
