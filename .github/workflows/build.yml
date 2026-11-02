@@ -206,18 +206,18 @@ jobs:
           else
             echo "Google Play klic nebyl nalezen, preskakuji Google Play upload."
           fi
-
-      - name: Publish Android APK to Huawei AppGallery Connect
+      - name: Publish Android APK to Huawei AppGallery
         run: |
           if [ "$PUBLISH_TO_STORES" != "true" ]; then
             echo "Publikace do obchodu je vypnuta (PUBLISH_TO_STORES=false). Preskakuji Huawei AppGallery upload."
           elif [ -s "iosApp/signing/huawei_key.json.b64" ]; then
-            echo "Nalezen Huawei AppGallery klic, dekoduji a nahravam .apk do Huawei AppGallery Connect..."
+            echo "Nalezen Huawei Service Account klic, dekoduji a pripojuji se k Huawei AppGallery Connect..."
             base64 --decode < iosApp/signing/huawei_key.json.b64 > /tmp/huawei_key.json
-            pip3 install --quiet --break-system-packages requests || pip3 install --quiet requests
+            pip3 install --quiet --break-system-packages pyjwt cryptography requests || \
+            pip3 install --quiet pyjwt cryptography requests
 
             python3 - << 'EOF'
-          import os, sys, json, requests
+          import os, sys, json, time, jwt, requests
 
           package_name = os.environ.get("BUNDLE_ID", "").strip()
           build_num = os.environ.get("PROJECT_BUILD_NUMBER", "101").strip()
@@ -225,81 +225,155 @@ jobs:
           app_version = os.environ.get("APP_VERSION", "1.0").strip()
           apk_path = f"composeApp/build/outputs/apk/release/{app_name}-{app_version}.{build_num}.apk"
 
+          KNOWN_APP_IDS = {
+              "cz.taximares.radiopm": "119618129",
+              "cz.mares.radiopm": "119618129"
+          }
+
+          if not os.path.exists(apk_path):
+              print(f"UPOZORNENI: APK soubor {apk_path} nebyl nalezen, preskakuji Huawei upload.")
+              sys.exit(0)
+
           try:
               with open("/tmp/huawei_key.json", "r", encoding="utf-8") as f:
-                  cfg = json.load(f)
-              client_id = str(cfg.get("client_id") or cfg.get("clientId") or "").strip()
-              client_secret = str(cfg.get("client_secret") or cfg.get("clientSecret") or "").strip()
-              if not client_id or not client_secret:
-                  print("UPOZORNENI: V Huawei JSON klici chybi client_id nebo client_secret.")
-                  sys.exit(0)
+                  hk = json.load(f)
+              key_id = str(hk.get("key_id", "")).strip()
+              priv_key = str(hk.get("private_key", "")).strip()
+              sub_account = str(hk.get("sub_account", "")).strip()
+              token_uri = str(hk.get("token_uri", "https://connect-api.cloud.huawei.com/api/oauth2/v1/token")).strip()
+              base_agc = "https://connect-api.cloud.huawei.com/api"
 
-              base_url = "https://connect-api.cloud.huawei.com/api"
-              tok_res = requests.post(
-                  f"{base_url}/oauth2/v1/token",
-                  json={"grant_type": "client_credentials", "client_id": client_id, "client_secret": client_secret},
-                  timeout=30
-              )
-              if not tok_res.ok or "access_token" not in tok_res.json():
-                  print(f"UPOZORNENI: Nepodarilo se ziskat Huawei OAuth token ({tok_res.status_code}): {tok_res.text}")
-                  sys.exit(0)
+              now = int(time.time())
+              candidates = []
+              for alg in ["PS256", "RS256"]:
+                  for aud_val in [
+                      "https://connect-api.cloud.huawei.com/api/oauth2/v1/token",
+                      token_uri,
+                      "https://connect-api.cloud.huawei.com"
+                  ]:
+                      try:
+                          pl = {"iss": sub_account, "aud": aud_val, "iat": now - 30, "exp": now + 3000}
+                          tok = jwt.encode(pl, priv_key, algorithm=alg, headers={"kid": key_id, "typ": "JWT", "alg": alg})
+                          if isinstance(tok, bytes):
+                              tok = tok.decode("utf-8")
+                          candidates.append((f"JWT-{alg} (aud={aud_val})", {
+                              "Authorization": f"Bearer {tok}",
+                              "client_id": sub_account,
+                              "Content-Type": "application/json"
+                          }))
+                      except Exception as sign_err:
+                          pass
 
-              access_token = tok_res.json()["access_token"]
-              headers = {"client_id": client_id, "Authorization": f"Bearer {access_token}"}
+              if "client_secret" in hk or "key" in hk:
+                  c_sec = hk.get("client_secret") or hk.get("key")
+                  c_id = hk.get("client_id") or sub_account
+                  tr = requests.post(f"{base_agc}/oauth2/v1/token", json={"grant_type": "client_credentials", "client_id": c_id, "client_secret": c_sec}, timeout=30)
+                  if tr.ok and tr.json().get("access_token"):
+                      at = tr.json()["access_token"]
+                      candidates.insert(0, ("OAuth-ClientCredentials", {
+                          "Authorization": f"Bearer {at}",
+                          "client_id": str(c_id),
+                          "Content-Type": "application/json"
+                      }))
 
-              info_res = requests.get(
-                  f"{base_url}/publish/v2/app-info",
-                  params={"packageName": package_name},
-                  headers=headers,
-                  timeout=30
-              )
-              info_json = info_res.json() if info_res.ok else {}
-              ret_code = info_json.get("ret", {}).get("code", -1)
-              app_id = str(info_json.get("appInfo", {}).get("appId") or "").strip()
+              working_headers = None
+              app_res = None
+              last_err_detail = ""
+              known_id = KNOWN_APP_IDS.get(package_name, "")
 
-              if ret_code != 0 or not app_id:
-                  print(f"UPOZORNENI: Balicek '{package_name}' zatim v Huawei AppGallery Connect neexistuje ({info_json.get('ret', info_res.text)}).")
-                  print("Zaloz aplikaci v Huawei AppGallery Connect pod timto nazvem balicku a spust build znovu.")
-                  sys.exit(0)
-
-              print(f"Nalezena Huawei aplikace (appId: {app_id}). Ziskavam upload URL pro APK...")
-              file_size = os.path.getsize(apk_path)
-              file_name = os.path.basename(apk_path)
-
-              url_res = requests.get(
-                  f"{base_url}/publish/v2/upload-url/for-obs",
-                  params={"appId": app_id, "suffix": "apk", "contentLength": file_size, "fileName": file_name},
-                  headers=headers,
-                  timeout=30
-              )
-              url_json = url_res.json() if url_res.ok else {}
-              if "urlInfo" in url_json:
-                  u_info = url_json["urlInfo"]
-                  upload_url = u_info["url"]
-                  put_headers = u_info.get("headers", {})
-                  object_id = u_info.get("objectId", "")
-                  with open(apk_path, "rb") as apk_f:
-                      up_res = requests.put(upload_url, data=apk_f, headers=put_headers, timeout=300)
-                  if up_res.ok:
-                      upd_res = requests.put(
-                          f"{base_url}/publish/v2/app-file-info",
-                          params={"appId": app_id},
-                          headers=headers,
-                          json={"fileType": 5, "files": [{"fileName": file_name, "fileDestUrl": object_id, "size": str(file_size)}]},
-                          timeout=60
-                      )
-                      print(f"APK uspesne nahrano do Huawei AppGallery Connect ({upd_res.status_code}: {upd_res.text})!")
+              for label, hdrs in candidates:
+                  test_r = requests.get(f"{base_agc}/publish/v2/appid-list", params={"packageName": package_name}, headers=hdrs, timeout=30)
+                  if test_r.ok:
+                      working_headers = hdrs
+                      app_res = test_r
+                      print(f"Huawei autorizace uspesna ({label}).")
+                      break
+                  elif known_id:
+                      test_r2 = requests.get(f"{base_agc}/publish/v2/app-info", params={"appId": known_id}, headers=hdrs, timeout=30)
+                      if test_r2.ok:
+                          working_headers = hdrs
+                          app_res = test_r2
+                          print(f"Huawei autorizace uspesna pres App ID {known_id} ({label}).")
+                          break
+                      else:
+                          last_err_detail = f"{label} -> HTTP {test_r2.status_code}: {test_r2.text}"
                   else:
-                      print(f"UPOZORNENI: Chyba pri uploadu APK do Huawei OBS ({up_res.status_code}): {up_res.text}")
+                      last_err_detail = f"{label} -> HTTP {test_r.status_code}: {test_r.text}"
+
+              if not working_headers:
+                  print(f"UPOZORNENI: Huawei AppGallery API odmitlo autorizaci. Posledni odpoved serveru: {last_err_detail}")
+                  sys.exit(0)
+
+              huawei_app_id = ""
+              if app_res and app_res.ok:
+                  app_ids = app_res.json().get("appids", [])
+                  if app_ids:
+                      huawei_app_id = str(app_ids[0].get("value", ""))
+
+              if not huawei_app_id and known_id:
+                  huawei_app_id = known_id
+                  print(f"Balicek '{package_name}' v konzoli jeste nema prirazeny packageName (--), pouzivam zalozene App ID: {huawei_app_id}.")
+
+              if not huawei_app_id:
+                  print(f"UPOZORNENI: Balicek '{package_name}' zatim v Huawei AppGallery Connect neexistuje.")
+                  sys.exit(0)
+
+              print(f"Pripravuji nahrani {os.path.basename(apk_path)} do Huawei App ID: {huawei_app_id}...")
+              url_res = requests.get(
+                  f"{base_agc}/publish/v2/upload-url/for-obs",
+                  params={"appId": huawei_app_id, "fileName": os.path.basename(apk_path), "contentLength": os.path.getsize(apk_path)},
+                  headers=working_headers,
+                  timeout=30
+              )
+              if url_res.ok and url_res.json().get("urlInfo"):
+                  url_info = url_res.json()["urlInfo"]
+                  upload_url = url_info.get("url")
+                  upload_headers = dict(url_info.get("headers", {}))
+                  with open(apk_path, "rb") as apk_f:
+                      up_r = requests.put(upload_url, data=apk_f, headers=upload_headers, timeout=300)
+                  if up_r.ok:
+                      file_info_body = {
+                          "fileType": 5,
+                          "files": [{"fileName": os.path.basename(apk_path), "fileDestUrl": url_info.get("objectId", "")}]
+                      }
+                      fi_r = requests.put(f"{base_agc}/publish/v2/app-file-info", params={"appId": huawei_app_id}, json=file_info_body, headers=working_headers, timeout=60)
+                      if fi_r.ok and str(fi_r.json().get("ret", {}).get("code", "")) == "0":
+                          print(f"APK {os.path.basename(apk_path)} uspesne nahrano a prirazeno do Huawei AppGallery Connect (App ID {huawei_app_id})!")
+                      else:
+                          print(f"Odpoved Huawei pri prirazeni APK (app-file-info): {fi_r.status_code} {fi_r.text}")
+                  else:
+                      print(f"Upozorneni pri nahravani souboru na Huawei OBS: {up_r.status_code} {up_r.text}")
               else:
-                  print(f"UPOZORNENI: Huawei upload-url odpoved: {url_res.status_code} {url_res.text}")
+                  print(f"Odpoved upload-url/for-obs ({url_res.status_code}: {url_res.text}), zkousim standardni upload-url...")
+                  u2_res = requests.get(f"{base_agc}/publish/v2/upload-url", params={"appId": huawei_app_id, "suffix": "apk"}, headers=working_headers, timeout=30)
+                  if u2_res.ok and u2_res.json().get("uploadUrl"):
+                      u2_data = u2_res.json()
+                      with open(apk_path, "rb") as apk_f:
+                          up2_r = requests.post(
+                              u2_data["uploadUrl"],
+                              files={"file": (os.path.basename(apk_path), apk_f, "application/octet-stream")},
+                              data={"authCode": u2_data.get("authCode", ""), "fileCount": "1"},
+                              timeout=300
+                          )
+                      if up2_r.ok:
+                          flist = up2_r.json().get("result", {}).get("UploadFileRsp", {}).get("fileInfoList", [])
+                          if flist:
+                              dest_url = flist[0].get("fileDestUlr") or flist[0].get("fileDestUrl")
+                              fi_body = {"fileType": 5, "files": [{"fileName": os.path.basename(apk_path), "fileDestUrl": dest_url}]}
+                              fi2_r = requests.put(f"{base_agc}/publish/v2/app-file-info", params={"appId": huawei_app_id}, json=fi_body, headers=working_headers, timeout=60)
+                              print(f"APK nahrano pres upload-url do Huawei AppGallery ({fi2_r.status_code}): {fi2_r.text}")
+                          else:
+                              print(f"Odpoved po uploadu: {up2_r.text}")
+                      else:
+                          print(f"Chyba pri POST uploadu APK: {up2_r.status_code} {up2_r.text}")
+                  else:
+                      print(f"Nelze ziskat upload URL z Huawei AppGallery: {u2_res.status_code} {u2_res.text}")
           except Exception as e:
-              print(f"UPOZORNENI: Chyba pri komunikaci s Huawei AppGallery Connect: {e}")
+              print(f"UPOZORNENI: Chyba pri komunikaci s Huawei AppGallery API: {e}")
           EOF
           else
-            echo "Huawei AppGallery klic nebyl nalezen, preskakuji Huawei upload."
+            echo "Huawei klic nebyl nalezen, preskakuji Huawei AppGallery upload."
           fi
-
   build-ios:
     name: iOS Release (.ipa & TestFlight)
     runs-on: macos-latest
