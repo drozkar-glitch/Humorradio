@@ -1,9 +1,15 @@
+import java.awt.BasicStroke
+import java.awt.Color
+import java.awt.RenderingHints
+import java.awt.geom.Ellipse2D
+import java.awt.geom.Line2D
+import java.awt.geom.RoundRectangle2D
+import java.awt.image.BufferedImage
 import java.io.ByteArrayOutputStream
 import java.io.FileOutputStream
 import java.util.zip.CRC32
 import java.util.zip.Deflater
 import java.util.zip.DeflaterOutputStream
-import kotlin.math.sqrt
 
 plugins {
     id("org.jetbrains.kotlin.multiplatform")
@@ -109,6 +115,12 @@ android {
                 signingConfigs.getByName("debug")
             }
         }
+        getByName("debug") {
+            val releaseSigning = signingConfigs.getByName("release")
+            if (releaseSigning.storeFile != null) {
+                signingConfig = releaseSigning
+            }
+        }
     }
 
     compileOptions {
@@ -128,44 +140,130 @@ val generateIosIcon = tasks.register("generateIosIcon") {
         val iconDir = rootProject.file("iosApp/iosApp/Assets.xcassets/AppIcon.appiconset")
         iconDir.mkdirs()
         val outFile = File(iconDir, "app-icon-1024.png")
+
         val width = 1024
         val height = 1024
+        val canvas = BufferedImage(width, height, BufferedImage.TYPE_INT_RGB)
+        val g2d = canvas.createGraphics()
+        g2d.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+        g2d.setRenderingHint(RenderingHints.KEY_STROKE_CONTROL, RenderingHints.VALUE_STROKE_PURE)
+        g2d.setRenderingHint(RenderingHints.KEY_RENDERING, RenderingHints.VALUE_RENDER_QUALITY)
+
+        val darkBg = Color(0x0C, 0x1C, 0x2C)
+        val gold = Color(0xFF, 0xD5, 0x4F)
+        val cyan = Color(0x4D, 0xD0, 0xE1)
+
+        // Pozadi shodné s ic_launcher_background.xml (#0C1C2C)
+        g2d.color = darkBg
+        g2d.fillRect(0, 0, width, height)
+
+        // Prevod souřadnic z Android adaptive ikony (vyrez 16..92 z 108x108 viewportu do 1024x1024)
+        val viewMin = 16.0
+        val viewSpan = 76.0
+        fun mapPos(v: Double): Double = ((v - viewMin) / viewSpan) * 1024.0
+        fun mapLen(d: Double): Double = (d / viewSpan) * 1024.0
+
+        // 1. Sikma antena: M34,38 L68,24 (strokeWidth 3.5, round cap)
+        g2d.color = gold
+        g2d.stroke = BasicStroke(mapLen(3.5).toFloat(), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        g2d.draw(Line2D.Double(mapPos(34.0), mapPos(38.0), mapPos(68.0), mapPos(24.0)))
+
+        // 2. Kulicka na konci anteny: stred (68, 24), polomer 3
+        val antR = mapLen(3.0)
+        g2d.fill(Ellipse2D.Double(mapPos(68.0) - antR, mapPos(24.0) - antR, antR * 2.0, antR * 2.0))
+
+        // 3. Telo radia: x=24..84, y=38..78, polomer rohu 4
+        val bodyCorner = mapLen(8.0)
+        g2d.color = gold
+        g2d.fill(
+            RoundRectangle2D.Double(
+                mapPos(24.0),
+                mapPos(38.0),
+                mapLen(60.0),
+                mapLen(40.0),
+                bodyCorner,
+                bodyCorner
+            )
+        )
+
+        // 4. Tmavý displej ladění: x=30..78, y=43..51
+        val screenCorner = mapLen(2.5)
+        g2d.color = darkBg
+        g2d.fill(
+            RoundRectangle2D.Double(
+                mapPos(30.0),
+                mapPos(43.0),
+                mapLen(48.0),
+                mapLen(8.0),
+                screenCorner,
+                screenCorner
+            )
+        )
+
+        // 5. Tyrkysová stupnice uvnitř displeje: M34,47 L74,47 (strokeWidth 2)
+        g2d.color = cyan
+        g2d.stroke = BasicStroke(mapLen(2.0).toFloat(), BasicStroke.CAP_ROUND, BasicStroke.JOIN_ROUND)
+        g2d.draw(Line2D.Double(mapPos(34.0), mapPos(47.0), mapPos(74.0), mapPos(47.0)))
+
+        // 6. Levy reproduktor: vnejsi kruh stred (42, 65), r=11 (#0C1C2C), vnitrni r=5 (#FFD54F)
+        val leftOuterR = mapLen(11.0)
+        g2d.color = darkBg
+        g2d.fill(
+            Ellipse2D.Double(
+                mapPos(42.0) - leftOuterR,
+                mapPos(65.0) - leftOuterR,
+                leftOuterR * 2.0,
+                leftOuterR * 2.0
+            )
+        )
+        val leftInnerR = mapLen(5.0)
+        g2d.color = gold
+        g2d.fill(
+            Ellipse2D.Double(
+                mapPos(42.0) - leftInnerR,
+                mapPos(65.0) - leftInnerR,
+                leftInnerR * 2.0,
+                leftInnerR * 2.0
+            )
+        )
+
+        // 7. Pravy reproduktor / knoflik: vnejsi kruh stred (68, 65), r=8 (#0C1C2C), vnitrni r=4 (#4DD0E1)
+        val rightOuterR = mapLen(8.0)
+        g2d.color = darkBg
+        g2d.fill(
+            Ellipse2D.Double(
+                mapPos(68.0) - rightOuterR,
+                mapPos(65.0) - rightOuterR,
+                rightOuterR * 2.0,
+                rightOuterR * 2.0
+            )
+        )
+        val rightInnerR = mapLen(4.0)
+        g2d.color = cyan
+        g2d.fill(
+            Ellipse2D.Double(
+                mapPos(68.0) - rightInnerR,
+                mapPos(65.0) - rightInnerR,
+                rightInnerR * 2.0,
+                rightInnerR * 2.0
+            )
+        )
+
+        g2d.dispose()
 
         val rawData = ByteArrayOutputStream(height * (width * 3 + 1))
         for (y in 0 until height) {
             rawData.write(0)
             for (x in 0 until width) {
-                var r = 12
-                var g = 28
-                var b = 44
-
-                val inBody = x in 170..854 && y in 310..830
-                val inScreen = x in 230..794 && y in 365..475
-                val dx1 = (x - 370).toDouble()
-                val dy1 = (y - 660).toDouble()
-                val dist1 = sqrt(dx1 * dx1 + dy1 * dy1)
-                val dx2 = (x - 680).toDouble()
-                val dy2 = (y - 640).toDouble()
-                val dist2 = sqrt(dx2 * dx2 + dy2 * dy2)
-
-                if (inBody) {
-                    r = 255; g = 213; b = 79
-                }
-                if (inScreen || dist1 < 135.0 || dist2 < 85.0) {
-                    r = 14; g = 24; b = 34
-                }
-                if (dist1 in 45.0..75.0 || dist2 in 25.0..45.0) {
-                    r = 77; g = 208; b = 225
-                }
-
-                rawData.write(r)
-                rawData.write(g)
-                rawData.write(b)
+                val rgb = canvas.getRGB(x, y)
+                rawData.write((rgb shr 16) and 0xFF)
+                rawData.write((rgb shr 8) and 0xFF)
+                rawData.write(rgb and 0xFF)
             }
         }
 
         val compressedData = ByteArrayOutputStream()
-        DeflaterOutputStream(compressedData, Deflater(Deflater.BEST_SPEED)).use {
+        DeflaterOutputStream(compressedData, Deflater(Deflater.BEST_COMPRESSION)).use {
             it.write(rawData.toByteArray())
         }
 

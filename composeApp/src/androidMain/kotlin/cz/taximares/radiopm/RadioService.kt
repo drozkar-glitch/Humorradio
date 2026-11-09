@@ -92,6 +92,7 @@ class RadioService : Service() {
     private var wifiLock: WifiManager.WifiLock? = null
     private var audioManager: AudioManager? = null
     private var audioFocusRequest: AudioFocusRequest? = null
+    private var modeChangedListener: Any? = null
     private val handler = Handler(Looper.getMainLooper())
 
     private var currentStationName: String = "Rádio B"
@@ -103,21 +104,30 @@ class RadioService : Service() {
     private var triedBackup: Boolean = false
     private var userRequestedStop: Boolean = false
     private var pausedByCall: Boolean = false
-
+    private var pausedByFocusLoss: Boolean = false
     private var fadeRunnable: Runnable? = null
     private var retryRunnable: Runnable? = null
     private var callMonitorRunnable: Runnable? = null
+    private var activeCallWatchRunnable: Runnable? = null
     private var duckRestoreRunnable: Runnable? = null
     private var cachedArtwork: Bitmap? = null
 
     private val audioFocusListener = AudioManager.OnAudioFocusChangeListener { focusChange ->
         when (focusChange) {
-            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT,
             AudioManager.AUDIOFOCUS_LOSS -> {
+                duckRestoreRunnable?.let { handler.removeCallbacks(it) }
                 if (isPhoneCallActive()) {
                     pauseForPhoneCall()
                 } else {
-                    duckBriefly()
+                    pauseForExternalMedia()
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                duckRestoreRunnable?.let { handler.removeCallbacks(it) }
+                if (isPhoneCallActive()) {
+                    pauseForPhoneCall()
+                } else {
+                    pauseForExternalMedia()
                 }
             }
             AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
@@ -129,10 +139,12 @@ class RadioService : Service() {
             }
             AudioManager.AUDIOFOCUS_GAIN -> {
                 duckRestoreRunnable?.let { handler.removeCallbacks(it) }
-                if (pausedByCall && !userRequestedStop) {
-                    resumeAfterPhoneCall()
-                } else if (!userRequestedStop) {
-                    player?.volume = 1.0f
+                if (!userRequestedStop && !isPhoneCallActive()) {
+                    if (pausedByCall || pausedByFocusLoss) {
+                        resumeAfterInterruption()
+                    } else {
+                        player?.volume = 1.0f
+                    }
                 }
             }
         }
@@ -142,9 +154,50 @@ class RadioService : Service() {
         super.onCreate()
         RadioController.init(applicationContext)
         audioManager = getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+        registerAudioModeListener()
         createNotificationChannel()
         initMediaSession()
         initExoPlayer()
+    }
+
+    private fun registerAudioModeListener() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = audioManager ?: return
+            try {
+                val listener = AudioManager.OnModeChangedListener { mode ->
+                    handler.post {
+                        val inCallOrRing = mode == AudioManager.MODE_IN_CALL ||
+                            mode == AudioManager.MODE_IN_COMMUNICATION ||
+                            mode == AudioManager.MODE_RINGTONE ||
+                            mode == AudioManager.MODE_CALL_SCREENING
+                        if (inCallOrRing) {
+                            if (!userRequestedStop && !pausedByCall) {
+                                pauseForPhoneCall()
+                            }
+                        } else if (mode == AudioManager.MODE_NORMAL) {
+                            if (pausedByCall && !userRequestedStop) {
+                                resumeAfterInterruption()
+                            }
+                        }
+                    }
+                }
+                am.addOnModeChangedListener(mainExecutor, listener)
+                modeChangedListener = listener
+            } catch (_: Exception) {
+            }
+        }
+    }
+
+    private fun unregisterAudioModeListener() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+            val am = audioManager ?: return
+            val listener = modeChangedListener as? AudioManager.OnModeChangedListener ?: return
+            try {
+                am.removeOnModeChangedListener(listener)
+            } catch (_: Exception) {
+            }
+            modeChangedListener = null
+        }
     }
 
     private fun isPhoneCallActive(): Boolean {
@@ -152,18 +205,72 @@ class RadioService : Service() {
         val mode = am.mode
         return mode == AudioManager.MODE_IN_CALL ||
             mode == AudioManager.MODE_IN_COMMUNICATION ||
-            mode == AudioManager.MODE_RINGTONE
+            mode == AudioManager.MODE_RINGTONE ||
+            (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && mode == AudioManager.MODE_CALL_SCREENING)
+    }
+
+    private fun startActivePlaybackCallWatcher() {
+        activeCallWatchRunnable?.let { handler.removeCallbacks(it) }
+        val r = object : Runnable {
+            override fun run() {
+                if (userRequestedStop || pausedByCall) return
+                if (isPhoneCallActive()) {
+                    pauseForPhoneCall()
+                    return
+                }
+                if (!pausedByFocusLoss) {
+                    handler.postDelayed(this, 800L)
+                }
+            }
+        }
+        activeCallWatchRunnable = r
+        handler.postDelayed(r, 800L)
+    }
+
+    private fun stopActivePlaybackCallWatcher() {
+        activeCallWatchRunnable?.let { handler.removeCallbacks(it) }
+        activeCallWatchRunnable = null
     }
 
     private fun pauseForPhoneCall() {
         if (userRequestedStop) return
         pausedByCall = true
+        pausedByFocusLoss = false
+        stopActivePlaybackCallWatcher()
         retryRunnable?.let { handler.removeCallbacks(it) }
+        fadeRunnable?.let { handler.removeCallbacks(it) }
+        duckRestoreRunnable?.let { handler.removeCallbacks(it) }
         player?.playWhenReady = false
         player?.stop()
         RadioController.updateState(false, "Pozastaveno (hovor)")
         updateMediaSessionAndNotification(false)
         startCallEndMonitor()
+    }
+
+    private fun pauseForExternalMedia() {
+        if (userRequestedStop) return
+        pausedByFocusLoss = true
+        stopActivePlaybackCallWatcher()
+        retryRunnable?.let { handler.removeCallbacks(it) }
+        fadeRunnable?.let { handler.removeCallbacks(it) }
+        duckRestoreRunnable?.let { handler.removeCallbacks(it) }
+        player?.playWhenReady = false
+        player?.stop()
+        RadioController.updateState(false, "Pozastaveno")
+        updateMediaSessionAndNotification(false)
+
+        // Pokud šlo o příchozí hovor, u kterého se režim AudioManageru přepnul o chvíli později,
+        // převedeme stav na hovor a aktivujeme automatické obnovení po zavěšení.
+        handler.postDelayed({
+            if (!userRequestedStop && pausedByFocusLoss && isPhoneCallActive()) {
+                pauseForPhoneCall()
+            }
+        }, 400L)
+        handler.postDelayed({
+            if (!userRequestedStop && pausedByFocusLoss && isPhoneCallActive()) {
+                pauseForPhoneCall()
+            }
+        }, 1200L)
     }
 
     private fun startCallEndMonitor() {
@@ -172,20 +279,25 @@ class RadioService : Service() {
             override fun run() {
                 if (userRequestedStop || !pausedByCall) return
                 if (!isPhoneCallActive()) {
-                    resumeAfterPhoneCall()
+                    resumeAfterInterruption()
                 } else {
-                    handler.postDelayed(this, 1500L)
+                    handler.postDelayed(this, 1000L)
                 }
             }
         }
         callMonitorRunnable = r
-        handler.postDelayed(r, 1500L)
+        handler.postDelayed(r, 1000L)
     }
 
-    private fun resumeAfterPhoneCall() {
+    private fun resumeAfterInterruption() {
         callMonitorRunnable?.let { handler.removeCallbacks(it) }
-        if (userRequestedStop || !pausedByCall) return
+        if (userRequestedStop || (!pausedByCall && !pausedByFocusLoss)) return
+        if (isPhoneCallActive()) {
+            startCallEndMonitor()
+            return
+        }
         pausedByCall = false
+        pausedByFocusLoss = false
         requestAudioFocusSafely()
         val urlToResume = activeUrl.ifBlank { currentPrimaryUrl }
         if (urlToResume.isNotEmpty()) {
@@ -195,11 +307,19 @@ class RadioService : Service() {
 
     private fun duckBriefly() {
         val exo = player ?: return
-        if (userRequestedStop || pausedByCall) return
-        exo.volume = 0.25f
+        if (userRequestedStop || pausedByCall || pausedByFocusLoss) return
+        exo.volume = 0.20f
         duckRestoreRunnable?.let { handler.removeCallbacks(it) }
+
+        // Okamžitá kontrola, zda nejde o náběh vyzvánění hovoru
+        handler.postDelayed({
+            if (!userRequestedStop && !pausedByCall && isPhoneCallActive()) {
+                pauseForPhoneCall()
+            }
+        }, 300L)
+
         val r = Runnable {
-            if (!userRequestedStop && !pausedByCall) {
+            if (!userRequestedStop && !pausedByCall && !pausedByFocusLoss) {
                 if (isPhoneCallActive()) {
                     pauseForPhoneCall()
                 } else {
@@ -223,7 +343,7 @@ class RadioService : Service() {
                             .build()
                     )
                     .setAcceptsDelayedFocusGain(true)
-                    .setWillPauseWhenDucked(false)
+                    .setWillPauseWhenDucked(true)
                     .setOnAudioFocusChangeListener(audioFocusListener, handler)
                     .build().also { audioFocusRequest = it }
                 am.requestAudioFocus(req)
@@ -259,6 +379,7 @@ class RadioService : Service() {
                 if (currentPrimaryUrl.isNotEmpty()) {
                     userRequestedStop = false
                     pausedByCall = false
+                    pausedByFocusLoss = false
                     requestAudioFocusSafely()
                     playUrl(currentPrimaryUrl, fadeIn = false)
                 } else {
@@ -385,7 +506,6 @@ class RadioService : Service() {
             }
         }
         if (startIdx < 0) return ""
-
         var endIdx = rawIcy.size
         for (i in startIdx until rawIcy.size) {
             if (rawIcy[i].toInt() == 0) {
@@ -425,7 +545,6 @@ class RadioService : Service() {
             }
         }
         flushBytes()
-
         return cleanAndRepairCzechText(sb.toString())
     }
 
@@ -494,21 +613,21 @@ class RadioService : Service() {
     private fun cleanAndRepairCzechText(input: String): String {
         if (input.isEmpty()) return ""
         var s = input
-            .replace("Ăˇ", "á").replace("Ă\u0081", "Á")
-            .replace("ÄŤ", "č").replace("ÄŚ", "Č")
-            .replace("ÄŹ", "ď").replace("ÄŽ", "Ď")
-            .replace("Ă©", "é").replace("Ă‰", "É")
-            .replace("Ä›", "ě").replace("Äš", "Ě")
-            .replace("Ă­", "í").replace("ĂŤ", "Í")
-            .replace("Ĺˆ", "ň").replace("Ĺ‡", "Ň")
-            .replace("Ăł", "ó").replace("Ă“", "Ó")
-            .replace("Ĺ™", "ř").replace("Ĺ\u0098", "Ř")
-            .replace("Ĺˇ", "š").replace("Ĺ ", "Š")
-            .replace("ĹĄ", "ť").replace("Ĺ¤", "Ť")
-            .replace("Ăş", "ú").replace("Ăš", "Ú")
-            .replace("ĹŻ", "ů").replace("Ĺ®", "Ů")
-            .replace("Ă˝", "ý").replace("Ăť", "Ý")
-            .replace("Ĺľ", "ž").replace("Ĺ˝", "Ž")
+            .replace("\u00C3\u00A1", "á").replace("\u00C3\u0081", "Á")
+            .replace("\u00C3\u00A9", "é").replace("\u00C3\u0089", "É")
+            .replace("\u00C3\u00AD", "í").replace("\u00C3\u008D", "Í")
+            .replace("\u00C3\u00B3", "ó").replace("\u00C3\u0093", "Ó")
+            .replace("\u00C3\u00BA", "ú").replace("\u00C3\u009A", "Ú")
+            .replace("\u00C3\u00BD", "ý").replace("\u00C3\u009D", "Ý")
+            .replace("\u00C4\u008D", "č").replace("\u00C4\u008C", "Č")
+            .replace("\u00C4\u008F", "ď").replace("\u00C4\u008E", "Ď")
+            .replace("\u00C4\u009B", "ě").replace("\u00C4\u009A", "Ě")
+            .replace("\u00C5\u0088", "ň").replace("\u00C5\u0087", "Ň")
+            .replace("\u00C5\u0099", "ř").replace("\u00C5\u0098", "Ř")
+            .replace("\u00C5\u00A1", "š").replace("\u00C5\u00A0", "Š")
+            .replace("\u00C5\u00A5", "ť").replace("\u00C5\u00A4", "Ť")
+            .replace("\u00C5\u00AF", "ů").replace("\u00C5\u00AE", "Ů")
+            .replace("\u00C5\u00BE", "ž").replace("\u00C5\u00BD", "Ž")
 
         s = decodeHtmlEntities(s)
         s = remapResidualLatin1ToWin1250(s)
@@ -529,14 +648,13 @@ class RadioService : Service() {
             .replace("V\uFFFDdy", "Vždy")
             .replace("l\uFFFDska", "láska")
             .replace("L\uFFFDska", "Láska")
-            .replace("p\uFFFDsnič", "písnič")
-            .replace("P\uFFFDsnič", "Písnič")
-            .replace("je\uFFFDtě", "ještě")
-            .replace("Je\uFFFDtě", "Ještě")
+            .replace("p\uFFFDsni", "písni")
+            .replace("P\uFFFDsni", "Písni")
+            .replace("je\uFFFDt", "ješt")
+            .replace("Je\uFFFDt", "Ješt")
 
         val hardConsonants = setOf('b', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'z')
         val softConsonants = setOf('c', 'č', 'ď', 'j', 'ň', 'ř', 'š', 'ť', 'ž')
-
         val sb = StringBuilder(s.length)
         var i = 0
         while (i < s.length) {
@@ -551,7 +669,7 @@ class RadioService : Service() {
                 } else if (isEndOfWord && prevLower in softConsonants) {
                     sb.append(if (prev.isUpperCase()) 'Í' else 'í')
                 } else if (prev.isLetter() && next.isLetter()) {
-                    sb.append(if (prev.isUpperCase() && next.isUpperCase()) 'Ý' else 'ý')
+                    sb.append(if (prev.isUpperCase() && next.isUpperCase()) 'Á' else 'á')
                 }
             } else {
                 sb.append(ch)
@@ -579,7 +697,7 @@ class RadioService : Service() {
         val exo = ExoPlayer.Builder(this)
             .setMediaSourceFactory(mediaSourceFactory)
             .setAudioAttributes(audioAttrs, false)
-            .setHandleAudioBecomingNoisy(false)
+            .setHandleAudioBecomingNoisy(true)
             .setWakeMode(C.WAKE_MODE_NETWORK)
             .build()
 
@@ -587,19 +705,21 @@ class RadioService : Service() {
             override fun onIsPlayingChanged(isPlaying: Boolean) {
                 if (isPlaying) {
                     pausedByCall = false
+                    pausedByFocusLoss = false
                     retryRunnable?.let { handler.removeCallbacks(it) }
                     RadioController.updateState(true, "Hraje: $currentStationName")
                     updateMediaSessionAndNotification(true)
-                } else if (!userRequestedStop && !pausedByCall && exo.playbackState == Player.STATE_BUFFERING) {
-                    RadioController.updateState(true, "Načítání: $currentStationName...")
+                    startActivePlaybackCallWatcher()
+                } else if (!userRequestedStop && !pausedByCall && !pausedByFocusLoss && exo.playbackState == Player.STATE_BUFFERING) {
+                    RadioController.updateState(true, "Načítám: $currentStationName...")
                     updateMediaSessionAndNotification(true)
                 }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
-                if (playbackState == Player.STATE_BUFFERING && !userRequestedStop && !pausedByCall) {
-                    RadioController.updateState(true, "Načítání: $currentStationName...")
-                } else if (playbackState == Player.STATE_ENDED && !userRequestedStop && !pausedByCall) {
+                if (playbackState == Player.STATE_BUFFERING && !userRequestedStop && !pausedByCall && !pausedByFocusLoss) {
+                    RadioController.updateState(true, "Načítám: $currentStationName...")
+                } else if (playbackState == Player.STATE_ENDED && !userRequestedStop && !pausedByCall && !pausedByFocusLoss) {
                     scheduleStreamReconnect()
                 }
             }
@@ -631,10 +751,12 @@ class RadioService : Service() {
             override fun onMediaMetadataChanged(mediaMetadata: MediaMetadata) {
                 val rawTitle = mediaMetadata.title?.toString()?.trim().orEmpty()
                 val rawArtist = mediaMetadata.artist?.toString()?.trim().orEmpty()
+
                 val title = fixCzechRdsEncoding(rawTitle)
                 val artist = fixCzechRdsEncoding(rawArtist)
+
                 val formatted = when {
-                    artist.isNotEmpty() && title.isNotEmpty() -> "$artist – $title"
+                    artist.isNotEmpty() && title.isNotEmpty() -> "$artist — $title"
                     title.isNotEmpty() -> title
                     else -> ""
                 }
@@ -643,7 +765,7 @@ class RadioService : Service() {
                     lastRawDecodedRds.isNotEmpty() && (formatted.isEmpty() || rawTitle.contains('\uFFFD')) -> lastRawDecodedRds
                     formatted.isNotEmpty() -> formatted
                     lastRawDecodedRds.isNotEmpty() -> lastRawDecodedRds
-                    else -> "$currentStationName – živé vysílání"
+                    else -> "$currentStationName • Živé vysílání"
                 }
 
                 currentRds = rds
@@ -654,7 +776,7 @@ class RadioService : Service() {
             }
 
             override fun onPlayerError(error: PlaybackException) {
-                if (userRequestedStop || pausedByCall) return
+                if (userRequestedStop || pausedByCall || pausedByFocusLoss) return
                 scheduleStreamReconnect()
             }
         })
@@ -663,7 +785,8 @@ class RadioService : Service() {
     }
 
     private fun scheduleStreamReconnect() {
-        if (userRequestedStop || pausedByCall) return
+        if (userRequestedStop || pausedByCall || pausedByFocusLoss) return
+
         if (!triedBackup && currentBackupUrl.isNotBlank() && currentBackupUrl != activeUrl) {
             triedBackup = true
             RadioController.updateState(true, "Přepínám na záložní stream...")
@@ -674,9 +797,10 @@ class RadioService : Service() {
 
         RadioController.updateState(true, "Obnovuji spojení: $currentStationName...")
         updateMediaSessionAndNotification(true)
+
         retryRunnable?.let { handler.removeCallbacks(it) }
         val r = Runnable {
-            if (!userRequestedStop && !pausedByCall && currentPrimaryUrl.isNotEmpty()) {
+            if (!userRequestedStop && !pausedByCall && !pausedByFocusLoss && currentPrimaryUrl.isNotEmpty()) {
                 triedBackup = false
                 playUrl(currentPrimaryUrl, fadeIn = false)
             }
@@ -695,8 +819,9 @@ class RadioService : Service() {
                 triedBackup = false
                 userRequestedStop = false
                 pausedByCall = false
+                pausedByFocusLoss = false
                 lastRawDecodedRds = ""
-                currentRds = "$currentStationName – živé vysílání"
+                currentRds = "$currentStationName • Živé vysílání"
                 RadioController.updateRds(currentRds)
 
                 acquireLocks()
@@ -726,8 +851,14 @@ class RadioService : Service() {
         retryRunnable?.let { handler.removeCallbacks(it) }
         fadeRunnable?.let { handler.removeCallbacks(it) }
 
+        if (isPhoneCallActive()) {
+            pauseForPhoneCall()
+            return
+        }
+
         RadioController.updateState(true, "Připojuji: $currentStationName...")
         updateMediaSessionAndNotification(true)
+        startActivePlaybackCallWatcher()
 
         val trimmed = url.trim()
         val lower = trimmed.lowercase()
@@ -735,7 +866,7 @@ class RadioService : Service() {
             thread {
                 val resolved = fetchPlaylistFirstStreamUrl(trimmed) ?: trimmed
                 handler.post {
-                    if (!userRequestedStop && !pausedByCall) {
+                    if (!userRequestedStop && !pausedByCall && !pausedByFocusLoss) {
                         startExoPlayerDirectUrl(resolved, fadeIn)
                     }
                 }
@@ -747,11 +878,14 @@ class RadioService : Service() {
 
     private fun startExoPlayerDirectUrl(streamUrl: String, fadeIn: Boolean) {
         val exo = player ?: return
+        if (isPhoneCallActive()) {
+            pauseForPhoneCall()
+            return
+        }
         exo.stop()
         exo.clearMediaItems()
         exo.setMediaItem(MediaItem.fromUri(Uri.parse(streamUrl)))
         exo.prepare()
-
         if (fadeIn) {
             exo.volume = 0.05f
             exo.playWhenReady = true
@@ -798,7 +932,7 @@ class RadioService : Service() {
         val r = object : Runnable {
             override fun run() {
                 val exo = player ?: return
-                if (userRequestedStop || pausedByCall) return
+                if (userRequestedStop || pausedByCall || pausedByFocusLoss) return
                 val vol = (currentStep.toFloat() / steps.toFloat()).coerceIn(0.05f, 1.0f)
                 exo.volume = vol
                 if (currentStep < steps) {
@@ -814,19 +948,24 @@ class RadioService : Service() {
     private fun stopPlaybackInternal() {
         userRequestedStop = true
         pausedByCall = false
+        pausedByFocusLoss = false
         lastRawDecodedRds = ""
+        stopActivePlaybackCallWatcher()
         retryRunnable?.let { handler.removeCallbacks(it) }
         fadeRunnable?.let { handler.removeCallbacks(it) }
         callMonitorRunnable?.let { handler.removeCallbacks(it) }
         duckRestoreRunnable?.let { handler.removeCallbacks(it) }
+
         player?.playWhenReady = false
         player?.stop()
         player?.clearMediaItems()
         abandonAudioFocusSafely()
+
         RadioController.updateState(false, "Zastaveno")
         RadioController.updateRds("")
         updateMediaSessionAndNotification(false)
         releaseLocks()
+
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -1026,7 +1165,6 @@ class RadioService : Service() {
             }
         } catch (_: Exception) {
         }
-
         try {
             if (wifiLock?.isHeld != true) {
                 val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
@@ -1063,10 +1201,12 @@ class RadioService : Service() {
     }
 
     override fun onDestroy() {
+        stopActivePlaybackCallWatcher()
         retryRunnable?.let { handler.removeCallbacks(it) }
         fadeRunnable?.let { handler.removeCallbacks(it) }
         callMonitorRunnable?.let { handler.removeCallbacks(it) }
         duckRestoreRunnable?.let { handler.removeCallbacks(it) }
+        unregisterAudioModeListener()
         abandonAudioFocusSafely()
         player?.release()
         player = null
