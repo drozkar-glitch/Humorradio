@@ -6,6 +6,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.media.AudioManager
+import android.net.Uri
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -47,9 +48,15 @@ actual object RadioController {
     private const val KEY_CACHED_STATIONS = "cached_stations_json_v9"
     private const val KEY_PRE_ALARM_ENABLED = "pre_alarm_enabled"
     private const val KEY_PRE_ALARM_TIME = "pre_alarm_target_ms"
+    private const val KEY_AUDIOBOOKS_V1 = "saved_audiobooks_json_v1"
+    private const val KEY_LAST_AUDIOBOOK_ID = "last_audiobook_id_v1"
+    private const val KEY_LAST_PLAYBACK_MODE = "last_playback_mode_v1"
 
     private var appContext: Context? = null
     private val mainHandler = Handler(Looper.getMainLooper())
+    private var pickFilesCallback: (() -> Unit)? = null
+    private var pickFolderCallback: (() -> Unit)? = null
+    private var lastAudiobookPersistRealtimeMs: Long = 0L
 
     private val _isPlaying = MutableStateFlow(false)
     actual val isPlaying: StateFlow<Boolean> = _isPlaying.asStateFlow()
@@ -66,11 +73,14 @@ actual object RadioController {
     private val _currentStation = MutableStateFlow(defaultCzechStations.first())
     actual val currentStation: StateFlow<RadioStation> = _currentStation.asStateFlow()
 
-    private val _presets = MutableStateFlow<List<RadioStation?>>(List(4) { null })
+    private val initialPresets: List<RadioStation?> = List(4) { null }
+    private val _presets = MutableStateFlow(initialPresets)
     actual val presets: StateFlow<List<RadioStation?>> = _presets.asStateFlow()
 
-    private val _stationIcons = MutableStateFlow<Map<String, ByteArray>>(emptyMap())
-    actual val stationIcons: StateFlow<Map<String, ByteArray>> = _stationIcons.asStateFlow()
+    private val initialIconsMap: kotlin.collections.Map<String, ByteArray> = emptyMap()
+    private val _stationIcons = MutableStateFlow(initialIconsMap)
+    actual val stationIcons: StateFlow<kotlin.collections.Map<String, ByteArray>> = _stationIcons.asStateFlow()
+
     private val loadingIcons = mutableSetOf<String>()
 
     private val _isUpdatingStations = MutableStateFlow(false)
@@ -94,6 +104,24 @@ actual object RadioController {
     private val _watchListScrollEvent = MutableStateFlow(0L to 0f)
     actual val watchListScrollEvent: StateFlow<Pair<Long, Float>> = _watchListScrollEvent.asStateFlow()
 
+    private val _playbackMode = MutableStateFlow(PlaybackMode.RADIO)
+    actual val playbackMode: StateFlow<PlaybackMode> = _playbackMode.asStateFlow()
+
+    private val _audiobooks = MutableStateFlow<List<AudiobookItem>>(emptyList())
+    actual val audiobooks: StateFlow<List<AudiobookItem>> = _audiobooks.asStateFlow()
+
+    private val _currentAudiobook = MutableStateFlow<AudiobookItem?>(null)
+    actual val currentAudiobook: StateFlow<AudiobookItem?> = _currentAudiobook.asStateFlow()
+
+    private val _audiobookPositionMs = MutableStateFlow(0L)
+    actual val audiobookPositionMs: StateFlow<Long> = _audiobookPositionMs.asStateFlow()
+
+    private val _audiobookDurationMs = MutableStateFlow(0L)
+    actual val audiobookDurationMs: StateFlow<Long> = _audiobookDurationMs.asStateFlow()
+
+    private val _isImportingAudiobooks = MutableStateFlow(false)
+    actual val isImportingAudiobooks: StateFlow<Boolean> = _isImportingAudiobooks.asStateFlow()
+
     private var sleepTimerRunnable: Runnable? = null
 
     fun init(context: Context) {
@@ -104,9 +132,325 @@ actual object RadioController {
         appContext = context.applicationContext
         loadCachedStations()
         loadPresetsAndLastStation()
+        loadAudiobooksFromPrefs()
         restorePreAlarmState()
         syncVolumePercent()
         refreshOnlineStations()
+    }
+
+    fun bindFilePickers(launchFiles: () -> Unit, launchFolder: () -> Unit) {
+        pickFilesCallback = launchFiles
+        pickFolderCallback = launchFolder
+    }
+
+    fun unbindFilePickers() {
+        pickFilesCallback = null
+        pickFolderCallback = null
+    }
+
+    fun onPickedAudiobookFiles(uris: List<Uri>) {
+        val ctx = appContext ?: return
+        if (uris.isEmpty()) return
+        _isImportingAudiobooks.value = true
+        thread {
+            val imported = AudiobookStorageAndroid.importDocumentUris(ctx, uris)
+            mainHandler.post {
+                mergeImportedAudiobooks(imported)
+                _isImportingAudiobooks.value = false
+            }
+        }
+    }
+
+    fun onPickedAudiobookFolder(treeUri: Uri?) {
+        val ctx = appContext ?: return
+        if (treeUri == null) return
+        _isImportingAudiobooks.value = true
+        thread {
+            val imported = AudiobookStorageAndroid.importFolderTreeUri(ctx, treeUri)
+            mainHandler.post {
+                mergeImportedAudiobooks(imported)
+                _isImportingAudiobooks.value = false
+            }
+        }
+    }
+
+    private fun mergeImportedAudiobooks(imported: List<AudiobookItem>) {
+        if (imported.isEmpty()) return
+        val existingIds = _audiobooks.value.associateBy { it.id }
+        val merged = _audiobooks.value.toMutableList()
+        for (item in imported) {
+            if (!existingIds.containsKey(item.id)) {
+                merged.add(item)
+            }
+        }
+        _audiobooks.value = merged
+        if (_currentAudiobook.value == null) {
+            val first = merged.firstOrNull()
+            _currentAudiobook.value = first
+            _audiobookPositionMs.value = first?.positionMs ?: 0L
+            _audiobookDurationMs.value = first?.durationMs ?: 0L
+        }
+        saveAudiobooksToPrefs()
+    }
+
+    actual fun pickAudiobookFiles() {
+        pickFilesCallback?.invoke()
+    }
+
+    actual fun pickAudiobookFolder() {
+        pickFolderCallback?.invoke()
+    }
+
+    actual fun selectAndPlayAudiobook(item: AudiobookItem) {
+        val ctx = appContext ?: return
+        val latest = _audiobooks.value.find { it.id == item.id } ?: item
+        val shouldRestartPlayed = latest.isPlayed && latest.positionMs <= 0L
+        val prepared = if (shouldRestartPlayed) {
+            latest.copy(isPlayed = false, positionMs = 0L)
+        } else {
+            latest
+        }
+        _playbackMode.value = PlaybackMode.AUDIOBOOK
+        _currentAudiobook.value = prepared
+        _audiobookPositionMs.value = prepared.positionMs
+        _audiobookDurationMs.value = prepared.durationMs
+        _audiobooks.value = _audiobooks.value.map { if (it.id == prepared.id) prepared else it }
+        _rdsText.value = ""
+        saveAudiobooksToPrefs()
+
+        val intent = Intent(ctx, RadioService::class.java).apply {
+            action = RadioService.ACTION_PLAY_AUDIOBOOK
+            putExtra(RadioService.EXTRA_AUDIOBOOK_ID, prepared.id)
+            putExtra(RadioService.EXTRA_AUDIOBOOK_TITLE, prepared.title)
+            putExtra(RadioService.EXTRA_AUDIOBOOK_GROUP, prepared.groupTitle)
+            putExtra(RadioService.EXTRA_AUDIOBOOK_URI, prepared.sourceUri)
+            putExtra(RadioService.EXTRA_AUDIOBOOK_ZIP_ENTRY, prepared.zipEntryPath)
+            putExtra(RadioService.EXTRA_AUDIOBOOK_EXT, prepared.extension)
+            putExtra(RadioService.EXTRA_AUDIOBOOK_START_POS, prepared.positionMs)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            ctx.startForegroundService(intent)
+        } else {
+            ctx.startService(intent)
+        }
+    }
+
+    actual fun seekAudiobookTo(positionMs: Long) {
+        val ctx = appContext ?: return
+        val target = positionMs.coerceAtLeast(0L)
+        _audiobookPositionMs.value = target
+        val cur = _currentAudiobook.value
+        if (cur != null) {
+            val updated = cur.copy(positionMs = target)
+            _currentAudiobook.value = updated
+            _audiobooks.value = _audiobooks.value.map { if (it.id == updated.id) updated else it }
+            saveAudiobooksToPrefs()
+        }
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            val intent = Intent(ctx, RadioService::class.java).apply {
+                action = RadioService.ACTION_SEEK_AUDIOBOOK
+                putExtra(RadioService.EXTRA_SEEK_POSITION_MS, target)
+            }
+            ctx.startService(intent)
+        }
+    }
+
+    actual fun seekAudiobookRelative(deltaMs: Long) {
+        val dur = _audiobookDurationMs.value
+        val raw = (_audiobookPositionMs.value + deltaMs).coerceAtLeast(0L)
+        val clamped = if (dur > 0L) raw.coerceAtMost(dur) else raw
+        seekAudiobookTo(clamped)
+    }
+
+    actual fun toggleAudiobookPlayed(itemId: String) {
+        val updated = _audiobooks.value.map { item ->
+            if (item.id == itemId) {
+                val nextPlayed = !item.isPlayed
+                item.copy(
+                    isPlayed = nextPlayed,
+                    positionMs = if (nextPlayed) 0L else item.positionMs
+                )
+            } else {
+                item
+            }
+        }
+        _audiobooks.value = updated
+        _currentAudiobook.value = updated.find { it.id == _currentAudiobook.value?.id }
+        if (_currentAudiobook.value?.id == itemId && _currentAudiobook.value?.isPlayed == true) {
+            _audiobookPositionMs.value = 0L
+        }
+        saveAudiobooksToPrefs()
+    }
+
+    actual fun removeAudiobook(itemId: String) {
+        val ctx = appContext
+        val wasCurrent = _currentAudiobook.value?.id == itemId
+        if (wasCurrent && _playbackMode.value == PlaybackMode.AUDIOBOOK && _isPlaying.value && ctx != null) {
+            ctx.startService(Intent(ctx, RadioService::class.java).apply { action = RadioService.ACTION_STOP })
+        }
+        val remaining = _audiobooks.value.filterNot { it.id == itemId }
+        _audiobooks.value = remaining
+        if (wasCurrent) {
+            val next = remaining.firstOrNull()
+            _currentAudiobook.value = next
+            _audiobookPositionMs.value = next?.positionMs ?: 0L
+            _audiobookDurationMs.value = next?.durationMs ?: 0L
+            if (next == null) {
+                _playbackMode.value = PlaybackMode.RADIO
+                if (ctx != null) AudiobookStorageAndroid.clearZipCache(ctx)
+            }
+        }
+        saveAudiobooksToPrefs()
+    }
+
+    actual fun removePlayedAudiobooks() {
+        val ctx = appContext
+        val curId = _currentAudiobook.value?.id
+        val remaining = _audiobooks.value.filterNot { item ->
+            item.isPlayed && !(item.id == curId && _isPlaying.value && _playbackMode.value == PlaybackMode.AUDIOBOOK)
+        }
+        _audiobooks.value = remaining
+        if (curId != null && remaining.none { it.id == curId }) {
+            val next = remaining.firstOrNull()
+            _currentAudiobook.value = next
+            _audiobookPositionMs.value = next?.positionMs ?: 0L
+            _audiobookDurationMs.value = next?.durationMs ?: 0L
+            if (next == null) {
+                _playbackMode.value = PlaybackMode.RADIO
+                if (ctx != null) AudiobookStorageAndroid.clearZipCache(ctx)
+            }
+        }
+        saveAudiobooksToPrefs()
+    }
+
+    fun onAudiobookProgressFromService(itemId: String, positionMs: Long, durationMs: Long, forcePersist: Boolean) {
+        if (itemId.isBlank()) return
+        val safePos = positionMs.coerceAtLeast(0L)
+        if (_currentAudiobook.value?.id == itemId) {
+            _audiobookPositionMs.value = safePos
+            if (durationMs > 0L) _audiobookDurationMs.value = durationMs
+        }
+        var changed = false
+        val updatedList = _audiobooks.value.map { item ->
+            if (item.id == itemId) {
+                changed = true
+                val newDur = if (durationMs > 0L) durationMs else item.durationMs
+                val copy = item.copy(positionMs = safePos, durationMs = newDur)
+                if (_currentAudiobook.value?.id == itemId) {
+                    _currentAudiobook.value = copy
+                }
+                copy
+            } else {
+                item
+            }
+        }
+        if (changed) {
+            _audiobooks.value = updatedList
+            val now = System.currentTimeMillis()
+            if (forcePersist || now - lastAudiobookPersistRealtimeMs >= 3000L) {
+                lastAudiobookPersistRealtimeMs = now
+                saveAudiobooksToPrefs()
+            }
+        }
+    }
+
+    fun onAudiobookFinishedFromService(itemId: String) {
+        val ctx = appContext ?: return
+        val list = _audiobooks.value
+        val idx = list.indexOfFirst { it.id == itemId }
+        val updatedList = list.map { item ->
+            if (item.id == itemId) item.copy(positionMs = 0L, isPlayed = true) else item
+        }
+        _audiobooks.value = updatedList
+        _currentAudiobook.value = updatedList.find { it.id == itemId } ?: _currentAudiobook.value
+        _audiobookPositionMs.value = 0L
+        saveAudiobooksToPrefs()
+
+        val nextUnplayed = if (idx >= 0 && idx + 1 < updatedList.size) {
+            updatedList.subList(idx + 1, updatedList.size).firstOrNull { !it.isPlayed }
+        } else {
+            null
+        }
+        if (nextUnplayed != null) {
+            selectAndPlayAudiobook(nextUnplayed)
+        } else {
+            ctx.startService(Intent(ctx, RadioService::class.java).apply { action = RadioService.ACTION_STOP })
+            _isPlaying.value = false
+            _statusMessage.value = "Audiokniha dohrána"
+        }
+    }
+
+    private fun saveAudiobooksToPrefs() {
+        val ctx = appContext ?: return
+        try {
+            val arr = JSONArray()
+            for (b in _audiobooks.value) {
+                val obj = JSONObject()
+                obj.put("id", b.id)
+                obj.put("title", b.title)
+                obj.put("groupTitle", b.groupTitle)
+                obj.put("sourceUri", b.sourceUri)
+                obj.put("zipEntryPath", b.zipEntryPath)
+                obj.put("extension", b.extension)
+                obj.put("positionMs", b.positionMs)
+                obj.put("durationMs", b.durationMs)
+                obj.put("isPlayed", b.isPlayed)
+                arr.put(obj)
+            }
+            ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit()
+                .putString(KEY_AUDIOBOOKS_V1, arr.toString())
+                .putString(KEY_LAST_AUDIOBOOK_ID, _currentAudiobook.value?.id.orEmpty())
+                .putString(KEY_LAST_PLAYBACK_MODE, _playbackMode.value.name)
+                .apply()
+        } catch (_: Exception) {
+        }
+    }
+
+    private fun loadAudiobooksFromPrefs() {
+        val ctx = appContext ?: return
+        try {
+            val prefs = ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val raw = prefs.getString(KEY_AUDIOBOOKS_V1, null)
+            if (!raw.isNullOrBlank()) {
+                val arr = JSONArray(raw)
+                val loaded = mutableListOf<AudiobookItem>()
+                for (i in 0 until arr.length()) {
+                    val o = arr.optJSONObject(i) ?: continue
+                    val id = o.optString("id", "")
+                    val title = o.optString("title", "")
+                    val uri = o.optString("sourceUri", "")
+                    if (id.isNotEmpty() && title.isNotEmpty() && uri.isNotEmpty()) {
+                        loaded.add(
+                            AudiobookItem(
+                                id = id,
+                                title = title,
+                                groupTitle = o.optString("groupTitle", ""),
+                                sourceUri = uri,
+                                zipEntryPath = o.optString("zipEntryPath", ""),
+                                extension = o.optString("extension", "mp3"),
+                                positionMs = o.optLong("positionMs", 0L),
+                                durationMs = o.optLong("durationMs", 0L),
+                                isPlayed = o.optBoolean("isPlayed", false)
+                            )
+                        )
+                    }
+                }
+                _audiobooks.value = loaded
+                val lastId = prefs.getString(KEY_LAST_AUDIOBOOK_ID, null)
+                val cur = loaded.find { it.id == lastId } ?: loaded.firstOrNull()
+                _currentAudiobook.value = cur
+                if (cur != null) {
+                    _audiobookPositionMs.value = cur.positionMs
+                    _audiobookDurationMs.value = cur.durationMs
+                }
+            }
+            val savedMode = prefs.getString(KEY_LAST_PLAYBACK_MODE, PlaybackMode.RADIO.name)
+            if (savedMode == PlaybackMode.AUDIOBOOK.name && _currentAudiobook.value != null) {
+                _playbackMode.value = PlaybackMode.AUDIOBOOK
+            }
+        } catch (_: Exception) {
+        }
     }
 
     fun syncVolumePercent() {
@@ -130,9 +474,7 @@ actual object RadioController {
             _watchListScrollEvent.value = System.currentTimeMillis() to delta
         } else {
             val dir = if (delta > 0f) 1 else if (delta < 0f) -1 else 0
-            if (dir != 0) {
-                adjustVolume(dir)
-            }
+            if (dir != 0) adjustVolume(dir)
         }
     }
 
@@ -181,6 +523,20 @@ actual object RadioController {
 
     actual fun togglePlayback() {
         val ctx = appContext ?: return
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            if (_isPlaying.value) {
+                val pauseIntent = Intent(ctx, RadioService::class.java).apply {
+                    action = RadioService.ACTION_PAUSE_AUDIOBOOK
+                }
+                ctx.startService(pauseIntent)
+            } else {
+                val cur = _currentAudiobook.value ?: _audiobooks.value.firstOrNull()
+                if (cur != null) {
+                    selectAndPlayAudiobook(cur)
+                }
+            }
+            return
+        }
         if (_isPlaying.value) {
             val stopIntent = Intent(ctx, RadioService::class.java).apply {
                 action = RadioService.ACTION_STOP
@@ -194,36 +550,48 @@ actual object RadioController {
     }
 
     actual fun playNextStation() {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            val list = _audiobooks.value
+            if (list.isEmpty()) return
+            val curId = _currentAudiobook.value?.id
+            val idx = list.indexOfFirst { it.id == curId }
+            val next = if (idx in list.indices) list[(idx + 1) % list.size] else list.first()
+            selectAndPlayAudiobook(next)
+            return
+        }
         val favoriteStations = _presets.value.filterNotNull()
         val listToCycle = if (favoriteStations.isNotEmpty()) favoriteStations else _allStations.value
         if (listToCycle.isEmpty()) return
         val cur = _currentStation.value
         val idx = listToCycle.indexOfFirst { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
-        val nextStation = if (idx in listToCycle.indices) {
-            listToCycle[(idx + 1) % listToCycle.size]
-        } else {
-            listToCycle.first()
-        }
+        val nextStation = if (idx in listToCycle.indices) listToCycle[(idx + 1) % listToCycle.size] else listToCycle.first()
         selectAndPlayStation(nextStation)
     }
 
     actual fun playPreviousStation() {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            val list = _audiobooks.value
+            if (list.isEmpty()) return
+            val curId = _currentAudiobook.value?.id
+            val idx = list.indexOfFirst { it.id == curId }
+            val prev = if (idx in list.indices) list[(idx - 1 + list.size) % list.size] else list.last()
+            selectAndPlayAudiobook(prev)
+            return
+        }
         val favoriteStations = _presets.value.filterNotNull()
         val listToCycle = if (favoriteStations.isNotEmpty()) favoriteStations else _allStations.value
         if (listToCycle.isEmpty()) return
         val cur = _currentStation.value
         val idx = listToCycle.indexOfFirst { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
-        val prevStation = if (idx in listToCycle.indices) {
-            listToCycle[(idx - 1 + listToCycle.size) % listToCycle.size]
-        } else {
-            listToCycle.last()
-        }
+        val prevStation = if (idx in listToCycle.indices) listToCycle[(idx - 1 + listToCycle.size) % listToCycle.size] else listToCycle.last()
         selectAndPlayStation(prevStation)
     }
 
     actual fun selectAndPlayStation(station: RadioStation) {
+        _playbackMode.value = PlaybackMode.RADIO
         _currentStation.value = station
         saveLastStation(station)
+        saveAudiobooksToPrefs()
         if (station.faviconUrl.isNotBlank()) {
             requestStationIcon(station.faviconUrl)
         }
@@ -231,10 +599,7 @@ actual object RadioController {
     }
 
     actual fun selectStationVariant(station: RadioStation, variant: StreamVariant) {
-        val updated = station.copy(
-            streamUrl = variant.url,
-            qualityLabel = variant.label
-        )
+        val updated = station.copy(streamUrl = variant.url, qualityLabel = variant.label)
         _allStations.value = _allStations.value.map {
             if (it.id == station.id || it.name.equals(station.name, ignoreCase = true)) updated else it
         }
@@ -274,8 +639,7 @@ actual object RadioController {
 
     actual fun requestStationIcon(url: String) {
         val cleanUrl = url.trim()
-        if (cleanUrl.isEmpty()) return
-        if (_stationIcons.value.containsKey(cleanUrl)) return
+        if (cleanUrl.isEmpty() || _stationIcons.value.containsKey(cleanUrl)) return
         synchronized(loadingIcons) {
             if (!loadingIcons.add(cleanUrl)) return
         }
@@ -306,9 +670,7 @@ actual object RadioController {
                 }
             } catch (_: Exception) {
             } finally {
-                synchronized(loadingIcons) {
-                    loadingIcons.remove(cleanUrl)
-                }
+                synchronized(loadingIcons) { loadingIcons.remove(cleanUrl) }
             }
         }
     }
@@ -317,11 +679,7 @@ actual object RadioController {
         if (_isUpdatingStations.value) return
         _isUpdatingStations.value = true
         thread {
-            val hosts = listOf(
-                "de1.api.radio-browser.info",
-                "at1.api.radio-browser.info",
-                "nl1.api.radio-browser.info"
-            )
+            val hosts = listOf("de1.api.radio-browser.info", "at1.api.radio-browser.info", "nl1.api.radio-browser.info")
             var fetched: List<RadioStation> = emptyList()
             for (host in hosts) {
                 try {
@@ -335,9 +693,7 @@ actual object RadioController {
                         val sb = StringBuilder()
                         BufferedReader(InputStreamReader(conn.inputStream, Charsets.UTF_8)).use { r ->
                             var line: String?
-                            while (r.readLine().also { line = it } != null) {
-                                sb.append(line)
-                            }
+                            while (r.readLine().also { line = it } != null) sb.append(line)
                         }
                         fetched = parseRadioBrowserJson(sb.toString())
                         if (fetched.isNotEmpty()) break
@@ -350,8 +706,6 @@ actual object RadioController {
                     val merged = mergeStationsWithDefaults(fetched)
                     _allStations.value = merged
                     saveStationsToCache(merged)
-
-                    // Doplneni pripadnych variant a ikony u aktualne vybrane stanice bez jejiho prepsani
                     val cur = _currentStation.value
                     val matched = merged.find { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
                     if (matched != null) {
@@ -361,9 +715,7 @@ actual object RadioController {
                             variants = if (matched.variants.size > cur.variants.size) matched.variants else cur.variants
                         )
                         _currentStation.value = updatedCur
-                        if (updatedCur.faviconUrl.isNotBlank()) {
-                            requestStationIcon(updatedCur.faviconUrl)
-                        }
+                        if (updatedCur.faviconUrl.isNotBlank()) requestStationIcon(updatedCur.faviconUrl)
                     }
                 }
                 _isUpdatingStations.value = false
@@ -374,7 +726,6 @@ actual object RadioController {
     private fun parseRadioBrowserJson(rawJson: String): List<RadioStation> {
         val arr = JSONArray(rawJson)
         val grouped = LinkedHashMap<String, MutableList<Triple<String, Int, String>>>()
-
         for (i in 0 until arr.length()) {
             val obj = arr.getJSONObject(i)
             val name = obj.optString("name", "").trim()
@@ -384,37 +735,27 @@ actual object RadioController {
             val codec = obj.optString("codec", "").uppercase(Locale.ROOT)
             val bitrate = obj.optInt("bitrate", 128).let { if (it <= 0) 128 else it }
             val favicon = obj.optString("favicon", "").trim()
-
             if (name.isEmpty() || streamUrl.isEmpty()) continue
-            if (codec.contains("UNKNOWN") || streamUrl.endsWith(".asx", ignoreCase = true) || streamUrl.endsWith(".wma", ignoreCase = true)) {
-                continue
-            }
-
-            val cleanName = cleanStationGroupName(name)
-            val list = grouped.getOrPut(cleanName) { mutableListOf() }
-            list.add(Triple(streamUrl, bitrate, favicon))
+            if (codec.contains("UNKNOWN") || streamUrl.endsWith(".asx", ignoreCase = true) || streamUrl.endsWith(".wma", ignoreCase = true)) continue
+            val cleanName = name
+                .replace(Regex("\\s*\\(\\d+\\s*kbps\\)", RegexOption.IGNORE_CASE), "")
+                .replace(Regex("\\s*-\\s*\\d+\\s*kbps$", RegexOption.IGNORE_CASE), "")
+                .trim()
+            grouped.getOrPut(cleanName) { mutableListOf() }.add(Triple(streamUrl, bitrate, favicon))
         }
-
         val result = mutableListOf<RadioStation>()
         var stationCounter = 0
         for ((name, streams) in grouped) {
             stationCounter++
-            val uniqueStreams = streams.distinctBy { it.first }
-            val sorted = uniqueStreams.sortedByDescending { it.second }
+            val sorted = streams.distinctBy { it.first }.sortedByDescending { it.second }
             val primary = sorted.first()
             val backup = sorted.getOrNull(1)?.first ?: ""
             val icon = sorted.firstOrNull { it.third.isNotEmpty() }?.third ?: ""
-
             val variants = sorted.mapIndexed { idx, triple ->
                 val br = triple.second
-                val label = if (sorted.count { it.second == br } > 1) {
-                    "${br} kbps (#${idx + 1})"
-                } else {
-                    "${br} kbps"
-                }
+                val label = if (sorted.count { it.second == br } > 1) "${br} kbps (#${idx + 1})" else "${br} kbps"
                 StreamVariant(label = label, url = triple.first, bitrate = br)
             }
-
             val slug = name.lowercase(Locale.ROOT).replace(Regex("[^a-z0-9]+"), "_").trim('_')
             val id = if (slug.isNotEmpty()) "online_$slug" else "online_st_$stationCounter"
             result.add(
@@ -432,17 +773,9 @@ actual object RadioController {
         return result
     }
 
-    private fun cleanStationGroupName(rawName: String): String {
-        return rawName
-            .replace(Regex("\\s*\\(\\d+\\s*kbps\\)", RegexOption.IGNORE_CASE), "")
-            .replace(Regex("\\s*-\\s*\\d+\\s*kbps$", RegexOption.IGNORE_CASE), "")
-            .trim()
-    }
-
     private fun mergeStationsWithDefaults(online: List<RadioStation>): List<RadioStation> {
         val result = mutableListOf<RadioStation>()
         val usedOnlineIndices = mutableSetOf<Int>()
-
         for (def in defaultCzechStations) {
             val matchIdx = online.indexOfFirst {
                 it.name.equals(def.name, ignoreCase = true) ||
@@ -451,24 +784,20 @@ actual object RadioController {
             if (matchIdx >= 0) {
                 usedOnlineIndices.add(matchIdx)
                 val on = online[matchIdx]
-                val combinedVariants = (on.variants + def.variants).distinctBy { it.url }
                 result.add(
                     def.copy(
                         streamUrl = def.streamUrl,
                         backupUrl = on.streamUrl.ifBlank { def.backupUrl },
                         faviconUrl = def.faviconUrl.ifBlank { on.faviconUrl },
-                        variants = combinedVariants
+                        variants = (on.variants + def.variants).distinctBy { it.url }
                     )
                 )
             } else {
                 result.add(def)
             }
         }
-
         for (i in online.indices) {
-            if (i !in usedOnlineIndices) {
-                result.add(online[i])
-            }
+            if (i !in usedOnlineIndices) result.add(online[i])
         }
         return result
     }
@@ -501,13 +830,7 @@ actual object RadioController {
                 val vObj = vArr.optJSONObject(j) ?: continue
                 val url = vObj.optString("url", "")
                 if (url.isNotEmpty()) {
-                    variants.add(
-                        StreamVariant(
-                            label = vObj.optString("label", "128 kbps"),
-                            url = url,
-                            bitrate = vObj.optInt("bitrate", 128)
-                        )
-                    )
+                    variants.add(StreamVariant(vObj.optString("label", "128 kbps"), url, vObj.optInt("bitrate", 128)))
                 }
             }
         }
@@ -520,9 +843,7 @@ actual object RadioController {
             backupUrl = obj.optString("backupUrl"),
             faviconUrl = obj.optString("faviconUrl"),
             qualityLabel = qualityLabel,
-            variants = variants.ifEmpty {
-                listOf(StreamVariant(qualityLabel, streamUrl))
-            }
+            variants = variants.ifEmpty { listOf(StreamVariant(qualityLabel, streamUrl)) }
         )
     }
 
@@ -530,9 +851,7 @@ actual object RadioController {
         val ctx = appContext ?: return
         try {
             val arr = JSONArray()
-            for (st in stations) {
-                arr.put(stationToJson(st))
-            }
+            for (st in stations) arr.put(stationToJson(st))
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
                 .putString(KEY_CACHED_STATIONS, arr.toString())
@@ -552,9 +871,7 @@ actual object RadioController {
                 val obj = arr.optJSONObject(i) ?: continue
                 loaded.add(stationFromJson(obj, "cached_$i"))
             }
-            if (loaded.isNotEmpty()) {
-                _allStations.value = mergeStationsWithDefaults(loaded)
-            }
+            if (loaded.isNotEmpty()) _allStations.value = mergeStationsWithDefaults(loaded)
         } catch (_: Exception) {
         }
     }
@@ -564,11 +881,7 @@ actual object RadioController {
         try {
             val arr = JSONArray()
             for (st in _presets.value.take(4)) {
-                if (st == null) {
-                    arr.put(JSONObject.NULL)
-                } else {
-                    arr.put(stationToJson(st))
-                }
+                arr.put(if (st == null) JSONObject.NULL else stationToJson(st))
             }
             ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
                 .edit()
@@ -585,6 +898,7 @@ actual object RadioController {
                 .edit()
                 .putString(KEY_LAST_STATION, station.id)
                 .putString(KEY_LAST_STATION_JSON, stationToJson(station).toString())
+                .putString(KEY_LAST_PLAYBACK_MODE, PlaybackMode.RADIO.name)
                 .apply()
         } catch (_: Exception) {
         }
@@ -600,19 +914,12 @@ actual object RadioController {
                 val list = MutableList<RadioStation?>(4) { null }
                 for (i in 0 until minOf(4, arr.length())) {
                     if (!arr.isNull(i)) {
-                        val obj = arr.getJSONObject(i)
-                        val parsed = stationFromJson(obj, "preset_$i")
-                        val fromAll = _allStations.value.find {
-                            it.id == parsed.id || it.name.equals(parsed.name, ignoreCase = true)
-                        }
-                        list[i] = if (fromAll != null) {
-                            fromAll.copy(
-                                streamUrl = parsed.streamUrl.ifBlank { fromAll.streamUrl },
-                                qualityLabel = parsed.qualityLabel.ifBlank { fromAll.qualityLabel }
-                            )
-                        } else {
-                            parsed
-                        }
+                        val parsed = stationFromJson(arr.getJSONObject(i), "preset_$i")
+                        val fromAll = _allStations.value.find { it.id == parsed.id || it.name.equals(parsed.name, ignoreCase = true) }
+                        list[i] = fromAll?.copy(
+                            streamUrl = parsed.streamUrl.ifBlank { fromAll.streamUrl },
+                            qualityLabel = parsed.qualityLabel.ifBlank { fromAll.qualityLabel }
+                        ) ?: parsed
                     }
                 }
                 _presets.value = list
@@ -623,48 +930,33 @@ actual object RadioController {
             _presets.value = List(4) { null }
         }
 
-        // 1. Nacteni kompletniho objektu posledni spustene stanice z JSONu
         var restoredStation: RadioStation? = null
         val rawLastJson = prefs.getString(KEY_LAST_STATION_JSON, null)
         if (!rawLastJson.isNullOrBlank()) {
             try {
-                val obj = JSONObject(rawLastJson)
-                val parsed = stationFromJson(obj, "last_station")
+                val parsed = stationFromJson(JSONObject(rawLastJson), "last_station")
                 if (parsed.name.isNotBlank() && parsed.streamUrl.isNotBlank()) {
-                    val fromAll = _allStations.value.find {
-                        it.id == parsed.id || it.name.equals(parsed.name, ignoreCase = true)
-                    }
-                    restoredStation = if (fromAll != null) {
-                        fromAll.copy(
-                            streamUrl = parsed.streamUrl.ifBlank { fromAll.streamUrl },
-                            qualityLabel = parsed.qualityLabel.ifBlank { fromAll.qualityLabel }
-                        )
-                    } else {
-                        parsed
-                    }
+                    val fromAll = _allStations.value.find { it.id == parsed.id || it.name.equals(parsed.name, ignoreCase = true) }
+                    restoredStation = fromAll?.copy(
+                        streamUrl = parsed.streamUrl.ifBlank { fromAll.streamUrl },
+                        qualityLabel = parsed.qualityLabel.ifBlank { fromAll.qualityLabel }
+                    ) ?: parsed
                 }
             } catch (_: Exception) {
             }
         }
-
-        // 2. Zalozni nacteni podle ID, pokud JSON jeste nebyl ulozen
         if (restoredStation == null) {
             val lastId = prefs.getString(KEY_LAST_STATION, null)
             if (!lastId.isNullOrBlank()) {
                 val cleanLastId = lastId.replace(Regex("_\\d+$"), "")
                 restoredStation = _allStations.value.find {
-                    it.id == lastId ||
-                        it.id == cleanLastId ||
-                        it.name.equals(lastId, ignoreCase = true)
+                    it.id == lastId || it.id == cleanLastId || it.name.equals(lastId, ignoreCase = true)
                 }
             }
         }
-
         if (restoredStation != null) {
             _currentStation.value = restoredStation
-            if (restoredStation.faviconUrl.isNotBlank()) {
-                requestStationIcon(restoredStation.faviconUrl)
-            }
+            if (restoredStation.faviconUrl.isNotBlank()) requestStationIcon(restoredStation.faviconUrl)
         }
     }
 
@@ -679,15 +971,12 @@ actual object RadioController {
         sleepTimerRunnable?.let { mainHandler.removeCallbacks(it) }
         _sleepTimerRemainingMinutes.value = minutes
         if (minutes <= 0) return
-
         val tick = object : Runnable {
             override fun run() {
                 val rem = _sleepTimerRemainingMinutes.value - 1
                 if (rem <= 0) {
                     _sleepTimerRemainingMinutes.value = 0
-                    if (_isPlaying.value) {
-                        togglePlayback()
-                    }
+                    if (_isPlaying.value) togglePlayback()
                 } else {
                     _sleepTimerRemainingMinutes.value = rem
                     mainHandler.postDelayed(this, 60_000L)
@@ -701,39 +990,26 @@ actual object RadioController {
     actual fun toggleOneShotPreAlarm() {
         val ctx = appContext ?: return
         val am = ctx.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-
         if (_isPreAlarmEnabled.value) {
             cancelPreAlarm(ctx, am)
             return
         }
-
         val nextAlarmClock = am.nextAlarmClock
         if (nextAlarmClock == null) {
             _isPreAlarmEnabled.value = false
             _preAlarmLabel.value = "V systému není zapnutý budík"
             try {
-                val showAlarms = Intent(AlarmClock.ACTION_SHOW_ALARMS).apply {
-                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
-                }
-                ctx.startActivity(showAlarms)
+                ctx.startActivity(Intent(AlarmClock.ACTION_SHOW_ALARMS).apply { flags = Intent.FLAG_ACTIVITY_NEW_TASK })
             } catch (_: Exception) {
             }
             return
         }
-
         val alarmTimeMs = nextAlarmClock.triggerTime
         val preAlarmTriggerMs = (alarmTimeMs - 30 * 60 * 1000L).coerceAtLeast(System.currentTimeMillis() + 5000L)
-
-        val pi = buildPreAlarmPendingIntent(ctx)
-        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preAlarmTriggerMs, pi)
-
+        am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, preAlarmTriggerMs, buildPreAlarmPendingIntent(ctx))
         val sdf = SimpleDateFormat("HH:mm", Locale.getDefault())
-        val preTimeStr = sdf.format(Date(preAlarmTriggerMs))
-        val alarmTimeStr = sdf.format(Date(alarmTimeMs))
-
         _isPreAlarmEnabled.value = true
-        _preAlarmLabel.value = "Rádio v $preTimeStr (budík $alarmTimeStr)"
-
+        _preAlarmLabel.value = "Rádio v ${sdf.format(Date(preAlarmTriggerMs))} (budík ${sdf.format(Date(alarmTimeMs))})"
         ctx.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putBoolean(KEY_PRE_ALARM_ENABLED, true)
@@ -775,16 +1051,12 @@ actual object RadioController {
             .putBoolean(KEY_PRE_ALARM_ENABLED, false)
             .remove(KEY_PRE_ALARM_TIME)
             .apply()
+        _playbackMode.value = PlaybackMode.RADIO
         startStationService(_currentStation.value, fadeIn = true)
     }
 
     private fun buildPreAlarmPendingIntent(ctx: Context): PendingIntent {
         val intent = Intent(ctx, WakeAlarmReceiver::class.java)
-        return PendingIntent.getBroadcast(
-            ctx,
-            7701,
-            intent,
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        )
+        return PendingIntent.getBroadcast(ctx, 7701, intent, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
     }
 }

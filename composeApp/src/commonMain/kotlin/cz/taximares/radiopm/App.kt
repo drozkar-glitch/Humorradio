@@ -19,20 +19,23 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DrawerValue
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
 import androidx.compose.material3.OutlinedTextField
@@ -40,6 +43,8 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -92,59 +97,33 @@ private val UI_WIN_1250_TABLE = charArrayOf(
 private val UI_DEC_ENTITY_REGEX = Regex("&#(\\d+);")
 private val UI_HEX_ENTITY_REGEX = Regex("&#[xX]([0-9a-fA-F]+);")
 
-private data class LiquidThemePalette(
-    val isDark: Boolean,
-    val bgGradient: List<Color>,
-    val drawerBg: Color,
-    val dialogBg: Color,
-    val primaryText: Color,
-    val secondaryText: Color,
-    val goldAccent: Color,
-    val cyanAccent: Color,
-    val cardBg: Color,
-    val cardBorder: Color,
-    val activeCardBg: Color,
-    val rdsBoxBg: Color
+private val DarkAppColors = darkColorScheme(
+    primary = Color(0xFFFFD54F),
+    secondary = Color(0xFF4DD0E1),
+    background = Color(0xFF07131E),
+    surface = Color(0xFF0E2233),
+    onPrimary = Color(0xFF121212),
+    onSecondary = Color(0xFF061621),
+    onBackground = Color.White,
+    onSurface = Color.White
 )
 
-private fun getPalette(isDark: Boolean): LiquidThemePalette {
-    return if (isDark) {
-        LiquidThemePalette(
-            isDark = true,
-            bgGradient = listOf(Color(0xFF07131E), Color(0xFF0C2233), Color(0xFF050E17)),
-            drawerBg = Color(0xFF0A1926),
-            dialogBg = Color(0xFF0E2233),
-            primaryText = Color.White,
-            secondaryText = Color.White.copy(alpha = 0.68f),
-            goldAccent = Color(0xFFFFD54F),
-            cyanAccent = Color(0xFF4DD0E1),
-            cardBg = Color.White.copy(alpha = 0.07f),
-            cardBorder = Color.White.copy(alpha = 0.18f),
-            activeCardBg = Color(0xFFFFD54F).copy(alpha = 0.18f),
-            rdsBoxBg = Color.Black.copy(alpha = 0.38f)
-        )
-    } else {
-        LiquidThemePalette(
-            isDark = false,
-            bgGradient = listOf(Color(0xFFEAF4FC), Color(0xFFD6E9F8), Color(0xFFC5E0F5)),
-            drawerBg = Color(0xFFF2F8FD),
-            dialogBg = Color(0xFFFFFFFF),
-            primaryText = Color(0xFF0A1E2E),
-            secondaryText = Color(0xFF33526B),
-            goldAccent = Color(0xFFB26A00),
-            cyanAccent = Color(0xFF007791),
-            cardBg = Color.White.copy(alpha = 0.72f),
-            cardBorder = Color(0xFF0A1E2E).copy(alpha = 0.15f),
-            activeCardBg = Color(0xFFFFD54F).copy(alpha = 0.35f),
-            rdsBoxBg = Color.White.copy(alpha = 0.85f)
-        )
-    }
-}
+private val LightAppColors = lightColorScheme(
+    primary = Color(0xFFB26A00),
+    secondary = Color(0xFF007791),
+    background = Color(0xFFEAF4FC),
+    surface = Color.White,
+    onPrimary = Color.White,
+    onSecondary = Color.White,
+    onBackground = Color(0xFF0A1E2E),
+    onSurface = Color(0xFF0A1E2E)
+)
 
 private fun filterSongRds(isPlaying: Boolean, rawRds: String, stationName: String): String {
     if (!isPlaying) return ""
     var clean = rawRds.trim()
     if (clean.isEmpty()) return ""
+
     if (clean.contains("&#")) {
         clean = UI_DEC_ENTITY_REGEX.replace(clean) { m ->
             val code = m.groupValues[1].toIntOrNull()
@@ -155,20 +134,18 @@ private fun filterSongRds(isPlaying: Boolean, rawRds: String, stationName: Strin
             if (code != null && code in 32..0x10FFFF) code.toChar().toString() else m.value
         }
     }
+
     if (clean.any { it.code in 0x80..0xFF && UI_WIN_1250_TABLE[it.code - 0x80] != it }) {
         val sb = StringBuilder(clean.length)
         for (ch in clean) {
-            if (ch.code in 0x80..0xFF) {
-                sb.append(UI_WIN_1250_TABLE[ch.code - 0x80])
-            } else {
-                sb.append(ch)
-            }
+            if (ch.code in 0x80..0xFF) sb.append(UI_WIN_1250_TABLE[ch.code - 0x80]) else sb.append(ch)
         }
         clean = sb.toString()
     }
+
     if (clean.equals("Vyber stanici a stiskni Play", ignoreCase = true)) return ""
     if (clean.equals("Živé vysílání", ignoreCase = true)) return ""
-    if (clean.endsWith("– živé vysílání", ignoreCase = true)) return ""
+    if (clean.endsWith("— živé vysílání", ignoreCase = true)) return ""
     if (clean.endsWith("- živé vysílání", ignoreCase = true)) return ""
     if (clean.equals(stationName.trim(), ignoreCase = true)) return ""
     return clean
@@ -178,20 +155,25 @@ private fun filterSongRds(isPlaying: Boolean, rawRds: String, stationName: Strin
 fun App() {
     val isDark = isSystemInDarkTheme()
     val palette = remember(isDark) { getPalette(isDark) }
+    val colorScheme = if (isDark) DarkAppColors else LightAppColors
 
-    BoxWithConstraints(
-        modifier = Modifier
-            .fillMaxSize()
-            .background(Brush.verticalGradient(colors = palette.bgGradient))
-    ) {
-        val isWatchScreen = maxWidth < 300.dp || maxHeight < 300.dp
-        if (isWatchScreen) {
-            WatchRadioScreen()
-        } else {
-            LaunchedEffect(Unit) {
-                RadioController.setWatchStationListOpen(false)
+    MaterialTheme(colorScheme = colorScheme) {
+        BoxWithConstraints(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Brush.verticalGradient(colors = palette.bgGradient))
+        ) {
+            val celkovaSirka = maxWidth
+            val celkovaVyska = maxHeight
+            val isWatchScreen = celkovaSirka < 300.dp || celkovaVyska < 300.dp
+            if (isWatchScreen) {
+                WatchRadioScreen()
+            } else {
+                LaunchedEffect(Unit) {
+                    RadioController.setWatchStationListOpen(false)
+                }
+                PhoneRadioScreen(palette = palette)
             }
-            PhoneRadioScreen(palette = palette)
         }
     }
 }
@@ -208,11 +190,19 @@ private fun WatchRadioScreen() {
     val volumePercent by RadioController.volumePercent.collectAsState()
     val isListOpen by RadioController.isWatchStationListOpen.collectAsState()
     val scrollEvent by RadioController.watchListScrollEvent.collectAsState()
+    val playbackMode by RadioController.playbackMode.collectAsState()
+    val currentAudiobook by RadioController.currentAudiobook.collectAsState()
+    val audiobookPosMs by RadioController.audiobookPositionMs.collectAsState()
 
     val goldAccent = Color(0xFFFFD54F)
     val cyanAccent = Color(0xFF4DD0E1)
-    val displayRds = remember(isPlaying, rdsText, currentStation.name) {
-        filterSongRds(isPlaying, rdsText, currentStation.name)
+
+    val displayRds = remember(isPlaying, rdsText, currentStation.name, playbackMode, audiobookPosMs) {
+        if (playbackMode == PlaybackMode.AUDIOBOOK) {
+            formatAudioDuration(audiobookPosMs)
+        } else {
+            filterSongRds(isPlaying, rdsText, currentStation.name)
+        }
     }
 
     LaunchedEffect(currentStation.faviconUrl) {
@@ -231,7 +221,6 @@ private fun WatchRadioScreen() {
             val strokeWidth = 5.dp.toPx()
             val arcSize = Size(size.width - strokeWidth, size.height - strokeWidth)
             val topLeft = Offset(strokeWidth / 2f, strokeWidth / 2f)
-
             drawArc(
                 color = Color.White.copy(alpha = 0.10f),
                 startAngle = 135f,
@@ -241,12 +230,9 @@ private fun WatchRadioScreen() {
                 size = arcSize,
                 style = Stroke(width = strokeWidth, cap = StrokeCap.Round)
             )
-
             val sweep = (volumePercent.coerceIn(0, 100) / 100f) * 270f
             drawArc(
-                brush = Brush.sweepGradient(
-                    listOf(cyanAccent, goldAccent, cyanAccent)
-                ),
+                brush = Brush.sweepGradient(listOf(cyanAccent, goldAccent, cyanAccent)),
                 startAngle = 135f,
                 sweepAngle = sweep,
                 useCenter = false,
@@ -257,6 +243,11 @@ private fun WatchRadioScreen() {
         }
 
         if (!isListOpen) {
+            val watchTitle = if (playbackMode == PlaybackMode.AUDIOBOOK) {
+                currentAudiobook?.title ?: currentStation.name
+            } else {
+                currentStation.name
+            }
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -286,7 +277,7 @@ private fun WatchRadioScreen() {
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        text = currentStation.name,
+                        text = watchTitle,
                         color = goldAccent,
                         fontSize = 14.sp,
                         fontWeight = FontWeight.Bold,
@@ -302,13 +293,7 @@ private fun WatchRadioScreen() {
                         maxLines = 1,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .then(
-                                if (displayRds.isNotEmpty()) {
-                                    Modifier.basicMarquee(iterations = Int.MAX_VALUE)
-                                } else {
-                                    Modifier
-                                }
-                            )
+                            .then(if (displayRds.isNotEmpty()) Modifier.basicMarquee(iterations = Int.MAX_VALUE) else Modifier)
                     )
                 }
 
@@ -326,7 +311,6 @@ private fun WatchRadioScreen() {
                     ) {
                         Text("⏮", color = Color.White, fontSize = 15.sp)
                     }
-
                     Box(
                         modifier = Modifier
                             .size(54.dp)
@@ -343,7 +327,6 @@ private fun WatchRadioScreen() {
                             fontWeight = FontWeight.Bold
                         )
                     }
-
                     Box(
                         modifier = Modifier
                             .size(38.dp)
@@ -380,13 +363,9 @@ private fun WatchRadioScreen() {
             val combinedList = remember(favoriteStations, allStations) {
                 (favoriteStations + allStations).distinctBy { it.name }
             }
-
             LaunchedEffect(scrollEvent.first) {
-                if (scrollEvent.first != 0L) {
-                    listState.scrollBy(scrollEvent.second * 95f)
-                }
+                if (scrollEvent.first != 0L) listState.scrollBy(scrollEvent.second * 95f)
             }
-
             Column(
                 modifier = Modifier
                     .fillMaxSize()
@@ -401,16 +380,14 @@ private fun WatchRadioScreen() {
                         .padding(horizontal = 12.dp, vertical = 4.dp)
                 ) {
                     Text(
-                        text = "← Zpět na přehrávač",
+                        text = "Zpět na přehrávač",
                         color = cyanAccent,
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         maxLines = 1
                     )
                 }
-
                 Spacer(modifier = Modifier.height(6.dp))
-
                 LazyColumn(
                     state = listState,
                     modifier = Modifier.fillMaxSize(),
@@ -419,21 +396,15 @@ private fun WatchRadioScreen() {
                 ) {
                     items(combinedList.size) { idx ->
                         val station = combinedList[idx]
-                        val selected = station.id == currentStation.id || station.name == currentStation.name
+                        val selected = playbackMode == PlaybackMode.RADIO &&
+                            (station.id == currentStation.id || station.name == currentStation.name)
                         val isFav = favoriteStations.any { it.name == station.name }
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .clip(RoundedCornerShape(14.dp))
-                                .background(
-                                    if (selected) goldAccent.copy(alpha = 0.24f)
-                                    else Color.White.copy(alpha = 0.08f)
-                                )
-                                .border(
-                                    width = 1.dp,
-                                    color = if (selected) goldAccent else Color.White.copy(alpha = 0.12f),
-                                    shape = RoundedCornerShape(14.dp)
-                                )
+                                .background(if (selected) goldAccent.copy(alpha = 0.24f) else Color.White.copy(alpha = 0.08f))
+                                .border(1.dp, if (selected) goldAccent else Color.White.copy(alpha = 0.12f), RoundedCornerShape(14.dp))
                                 .clickable {
                                     RadioController.selectAndPlayStation(station)
                                     RadioController.setWatchStationListOpen(false)
@@ -467,9 +438,7 @@ private fun WatchRadioScreen() {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-private fun PhoneRadioScreen(
-    palette: LiquidThemePalette
-) {
+private fun PhoneRadioScreen(palette: LiquidThemePalette) {
     val isPlaying by RadioController.isPlaying.collectAsState()
     val statusMessage by RadioController.statusMessage.collectAsState()
     val rdsText by RadioController.rdsText.collectAsState()
@@ -482,14 +451,23 @@ private fun PhoneRadioScreen(
     val isPreAlarmEnabled by RadioController.isPreAlarmEnabled.collectAsState()
     val preAlarmLabel by RadioController.preAlarmLabel.collectAsState()
 
+    val playbackMode by RadioController.playbackMode.collectAsState()
+    val audiobooks by RadioController.audiobooks.collectAsState()
+    val currentAudiobook by RadioController.currentAudiobook.collectAsState()
+    val audiobookPositionMs by RadioController.audiobookPositionMs.collectAsState()
+    val audiobookDurationMs by RadioController.audiobookDurationMs.collectAsState()
+    val isImportingAudiobooks by RadioController.isImportingAudiobooks.collectAsState()
+
+    val isBookMode = playbackMode == PlaybackMode.AUDIOBOOK
     val displayRds = remember(isPlaying, rdsText, currentStation.name) {
         filterSongRds(isPlaying, rdsText, currentStation.name)
     }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
     val scope = rememberCoroutineScope()
-
-    var searchQuery by remember { mutableStateOf("") }
+    var showAudiobooksInDrawer by remember { mutableStateOf(false) }
+    var radioSearchQuery by remember { mutableStateOf("") }
+    var bookSearchQuery by remember { mutableStateOf("") }
     var stationForPresetDialog by remember { mutableStateOf<RadioStation?>(null) }
     var stationForQualityDialog by remember { mutableStateOf<RadioStation?>(null) }
 
@@ -499,15 +477,13 @@ private fun PhoneRadioScreen(
         }
     }
 
-    val filteredStations = remember(allStations, searchQuery) {
-        val trimmed = searchQuery.trim()
+    val filteredStations = remember(allStations, radioSearchQuery) {
+        val trimmed = radioSearchQuery.trim()
         if (trimmed.isEmpty()) {
             allStations
         } else {
             val q = normalizeSearchText(trimmed)
-            allStations.filter { st ->
-                normalizeSearchText(st.name).contains(q)
-            }
+            allStations.filter { st -> normalizeSearchText(st.name).contains(q) }
         }
     }
 
@@ -517,12 +493,12 @@ private fun PhoneRadioScreen(
             ModalDrawerSheet(
                 drawerContainerColor = palette.drawerBg,
                 drawerContentColor = palette.primaryText,
-                modifier = Modifier.width(330.dp)
+                modifier = Modifier.width(340.dp)
             ) {
                 Column(
                     modifier = Modifier
                         .fillMaxHeight()
-                        .systemBarsPadding()
+                        .windowInsetsPadding(WindowInsets.safeDrawing)
                         .padding(14.dp)
                 ) {
                     Row(
@@ -530,158 +506,199 @@ private fun PhoneRadioScreen(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        Column {
+                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Katalog českých rádií",
+                                text = if (showAudiobooksInDrawer) "Audioknihy" else "Katalog českých rádií",
                                 color = palette.goldAccent,
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = if (isUpdatingStations) "Aktualizuji seznam..." else "${allStations.size} stanic v databázi",
+                                text = if (showAudiobooksInDrawer) {
+                                    "${audiobooks.size} položek v seznamu"
+                                } else if (isUpdatingStations) {
+                                    "Aktualizuji seznam..."
+                                } else {
+                                    "${allStations.size} stanic v databázi"
+                                },
                                 color = palette.secondaryText,
-                                fontSize = 12.sp
+                                fontSize = 12.sp,
+                                maxLines = 1
                             )
                         }
-
+                        Spacer(modifier = Modifier.width(6.dp))
+                        if (!showAudiobooksInDrawer) {
+                            Box(
+                                modifier = Modifier
+                                    .clip(RoundedCornerShape(10.dp))
+                                    .background(palette.cardBg)
+                                    .border(1.dp, palette.cardBorder, RoundedCornerShape(10.dp))
+                                    .clickable { RadioController.refreshOnlineStations() }
+                                    .padding(horizontal = 8.dp, vertical = 7.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "↻",
+                                    color = palette.cyanAccent,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(6.dp))
+                        }
                         Box(
                             modifier = Modifier
                                 .clip(RoundedCornerShape(10.dp))
-                                .background(palette.cardBg)
-                                .border(1.dp, palette.cardBorder, RoundedCornerShape(10.dp))
-                                .clickable { RadioController.refreshOnlineStations() }
-                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                .background(palette.goldAccent.copy(alpha = 0.20f))
+                                .border(1.dp, palette.goldAccent.copy(alpha = 0.70f), RoundedCornerShape(10.dp))
+                                .clickable { showAudiobooksInDrawer = !showAudiobooksInDrawer }
+                                .padding(horizontal = 10.dp, vertical = 7.dp),
+                            contentAlignment = Alignment.Center
                         ) {
                             Text(
-                                text = "↻ Obnovit",
-                                color = palette.cyanAccent,
+                                text = if (showAudiobooksInDrawer) "📻 Rádia" else "📚 Audioknihy",
+                                color = palette.goldAccent,
                                 fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                maxLines = 1
+                                fontWeight = FontWeight.Bold,
+                                maxLines = 1,
+                                softWrap = false
                             )
                         }
                     }
 
                     Spacer(modifier = Modifier.height(10.dp))
 
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        placeholder = { Text("Hledat stanici (např. Rádio B, Impuls...)", fontSize = 13.sp) },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = OutlinedTextFieldDefaults.colors(
-                            focusedTextColor = palette.primaryText,
-                            unfocusedTextColor = palette.primaryText,
-                            focusedBorderColor = palette.goldAccent,
-                            unfocusedBorderColor = palette.cardBorder,
-                            focusedPlaceholderColor = palette.secondaryText,
-                            unfocusedPlaceholderColor = palette.secondaryText
+                    if (showAudiobooksInDrawer) {
+                        ColumnAudiobookCatalog(
+                            palette = palette,
+                            audiobooks = audiobooks,
+                            currentAudiobook = currentAudiobook,
+                            playbackMode = playbackMode,
+                            isImporting = isImportingAudiobooks,
+                            searchQuery = bookSearchQuery,
+                            onSearchQueryChange = { bookSearchQuery = it },
+                            onSelectAudiobook = { chosen ->
+                                RadioController.selectAndPlayAudiobook(chosen)
+                                scope.launch { drawerState.close() }
+                            },
+                            modifier = Modifier.weight(1f)
                         )
-                    )
-
-                    Spacer(modifier = Modifier.height(10.dp))
-
-                    if (filteredStations.isEmpty()) {
-                        Box(
-                            modifier = Modifier
-                                .weight(1f)
-                                .fillMaxWidth()
-                                .padding(20.dp),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Text(
-                                text = "Žádná stanice neodpovídá hledání „$searchQuery“",
-                                color = palette.secondaryText,
-                                fontSize = 14.sp,
-                                textAlign = TextAlign.Center
-                            )
-                        }
                     } else {
-                        LazyColumn(
-                            modifier = Modifier.weight(1f),
-                            verticalArrangement = Arrangement.spacedBy(8.dp),
-                            contentPadding = PaddingValues(bottom = 20.dp)
-                        ) {
-                            items(filteredStations.size) { index ->
-                                val station = filteredStations[index]
-                                val isSelected = station.id == currentStation.id || station.name == currentStation.name
-
-                                GlassCardBox(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clickable {
-                                            RadioController.selectAndPlayStation(station)
-                                            scope.launch { drawerState.close() }
-                                        },
-                                    borderColor = if (isSelected) palette.goldAccent else palette.cardBorder,
-                                    backgroundColor = if (isSelected) palette.activeCardBg else palette.cardBg
-                                ) {
-                                    Row(
+                        OutlinedTextField(
+                            value = radioSearchQuery,
+                            onValueChange = { radioSearchQuery = it },
+                            placeholder = { Text("Hledat stanici (např. Rádio B, Impuls...)", fontSize = 13.sp) },
+                            singleLine = true,
+                            modifier = Modifier.fillMaxWidth(),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedTextColor = palette.primaryText,
+                                unfocusedTextColor = palette.primaryText,
+                                focusedBorderColor = palette.goldAccent,
+                                unfocusedBorderColor = palette.cardBorder,
+                                focusedPlaceholderColor = palette.secondaryText,
+                                unfocusedPlaceholderColor = palette.secondaryText
+                            )
+                        )
+                        Spacer(modifier = Modifier.height(10.dp))
+                        if (filteredStations.isEmpty()) {
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .fillMaxWidth()
+                                    .padding(20.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = "Žádná stanice neodpovídá hledání „$radioSearchQuery“.",
+                                    color = palette.secondaryText,
+                                    fontSize = 14.sp,
+                                    textAlign = TextAlign.Center
+                                )
+                            }
+                        } else {
+                            LazyColumn(
+                                modifier = Modifier.weight(1f),
+                                verticalArrangement = Arrangement.spacedBy(8.dp),
+                                contentPadding = PaddingValues(bottom = 20.dp)
+                            ) {
+                                items(filteredStations.size) { index ->
+                                    val station = filteredStations[index]
+                                    val isSelected = !isBookMode &&
+                                        (station.id == currentStation.id || station.name == currentStation.name)
+                                    GlassCardBox(
                                         modifier = Modifier
                                             .fillMaxWidth()
-                                            .padding(10.dp),
-                                        verticalAlignment = Alignment.CenterVertically
+                                            .clickable {
+                                                RadioController.selectAndPlayStation(station)
+                                                scope.launch { drawerState.close() }
+                                            },
+                                        borderColor = if (isSelected) palette.goldAccent else palette.cardBorder,
+                                        backgroundColor = if (isSelected) palette.activeCardBg else palette.cardBg
                                     ) {
-                                        StationLogo(
-                                            station = station,
-                                            size = 42.dp,
-                                            isSelected = isSelected,
-                                            iconBytes = stationIcons[station.faviconUrl]
-                                        )
-
-                                        Spacer(modifier = Modifier.width(10.dp))
-
-                                        Column(modifier = Modifier.weight(1f)) {
-                                            Text(
-                                                text = station.name,
-                                                color = if (isSelected) palette.goldAccent else palette.primaryText,
-                                                fontSize = 14.sp,
-                                                fontWeight = FontWeight.Bold,
-                                                maxLines = 1,
-                                                overflow = TextOverflow.Ellipsis
+                                        Row(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(10.dp),
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            StationLogo(
+                                                station = station,
+                                                size = 42.dp,
+                                                isSelected = isSelected,
+                                                iconBytes = stationIcons[station.faviconUrl]
                                             )
-                                            Text(
-                                                text = "Kvalita: ${station.qualityLabel}",
-                                                color = palette.secondaryText,
-                                                fontSize = 11.sp,
-                                                maxLines = 1
-                                            )
-                                        }
-
-                                        if (station.variants.size > 1) {
+                                            Spacer(modifier = Modifier.width(10.dp))
+                                            Column(modifier = Modifier.weight(1f)) {
+                                                Text(
+                                                    text = station.name,
+                                                    color = if (isSelected) palette.goldAccent else palette.primaryText,
+                                                    fontSize = 14.sp,
+                                                    fontWeight = FontWeight.Bold,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis
+                                                )
+                                                Text(
+                                                    text = "Kvalita: ${station.qualityLabel}",
+                                                    color = palette.secondaryText,
+                                                    fontSize = 11.sp,
+                                                    maxLines = 1
+                                                )
+                                            }
+                                            if (station.variants.size > 1) {
+                                                Box(
+                                                    modifier = Modifier
+                                                        .clip(RoundedCornerShape(8.dp))
+                                                        .background(palette.cyanAccent.copy(alpha = 0.16f))
+                                                        .clickable { stationForQualityDialog = station }
+                                                        .padding(horizontal = 8.dp, vertical = 5.dp)
+                                                ) {
+                                                    Text(
+                                                        text = "Kvalita",
+                                                        color = palette.cyanAccent,
+                                                        fontSize = 11.sp,
+                                                        fontWeight = FontWeight.SemiBold,
+                                                        maxLines = 1
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                            }
                                             Box(
                                                 modifier = Modifier
                                                     .clip(RoundedCornerShape(8.dp))
-                                                    .background(palette.cyanAccent.copy(alpha = 0.16f))
-                                                    .clickable { stationForQualityDialog = station }
+                                                    .background(palette.goldAccent.copy(alpha = 0.18f))
+                                                    .clickable { stationForPresetDialog = station }
                                                     .padding(horizontal = 8.dp, vertical = 5.dp)
                                             ) {
                                                 Text(
-                                                    text = "Kvalita",
-                                                    color = palette.cyanAccent,
+                                                    text = "Předvolba",
+                                                    color = palette.goldAccent,
                                                     fontSize = 11.sp,
                                                     fontWeight = FontWeight.SemiBold,
                                                     maxLines = 1
                                                 )
                                             }
-                                            Spacer(modifier = Modifier.width(6.dp))
-                                        }
-
-                                        Box(
-                                            modifier = Modifier
-                                                .clip(RoundedCornerShape(8.dp))
-                                                .background(palette.goldAccent.copy(alpha = 0.18f))
-                                                .clickable { stationForPresetDialog = station }
-                                                .padding(horizontal = 8.dp, vertical = 5.dp)
-                                        ) {
-                                            Text(
-                                                text = "★ Předvolba",
-                                                color = palette.goldAccent,
-                                                fontSize = 11.sp,
-                                                fontWeight = FontWeight.SemiBold,
-                                                maxLines = 1
-                                            )
                                         }
                                     }
                                 }
@@ -695,7 +712,7 @@ private fun PhoneRadioScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .systemBarsPadding()
+                .windowInsetsPadding(WindowInsets.safeDrawing)
                 .padding(horizontal = 16.dp, vertical = 10.dp),
             verticalArrangement = Arrangement.SpaceBetween
         ) {
@@ -706,6 +723,7 @@ private fun PhoneRadioScreen(
             ) {
                 GlassCardBox(
                     modifier = Modifier.clickable {
+                        showAudiobooksInDrawer = isBookMode
                         scope.launch { drawerState.open() }
                     },
                     borderColor = palette.goldAccent.copy(alpha = 0.5f),
@@ -723,7 +741,7 @@ private fun PhoneRadioScreen(
                         )
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(
-                            text = "Stanice",
+                            text = if (isBookMode) "Audioknihy" else "Stanice",
                             color = palette.primaryText,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
@@ -746,9 +764,19 @@ private fun PhoneRadioScreen(
                         .padding(horizontal = 8.dp)
                 )
 
+                val rightBadgeText = if (isBookMode) {
+                    val ext = currentAudiobook?.extension?.uppercase() ?: "AUDIO"
+                    if (currentAudiobook?.zipEntryPath?.isNotEmpty() == true) "$ext • ZIP" else ext
+                } else {
+                    currentStation.qualityLabel
+                }
+
                 GlassCardBox(
                     modifier = Modifier.clickable {
-                        if (currentStation.variants.size > 1) {
+                        if (isBookMode) {
+                            showAudiobooksInDrawer = true
+                            scope.launch { drawerState.open() }
+                        } else if (currentStation.variants.size > 1) {
                             stationForQualityDialog = currentStation
                         } else {
                             RadioController.refreshOnlineStations()
@@ -758,7 +786,7 @@ private fun PhoneRadioScreen(
                     backgroundColor = palette.cardBg
                 ) {
                     Text(
-                        text = currentStation.qualityLabel,
+                        text = rightBadgeText,
                         color = palette.cyanAccent,
                         fontSize = 13.sp,
                         fontWeight = FontWeight.SemiBold,
@@ -785,12 +813,20 @@ private fun PhoneRadioScreen(
                         horizontalArrangement = Arrangement.Center,
                         modifier = Modifier.fillMaxWidth()
                     ) {
-                        StationLogo(
-                            station = currentStation,
-                            size = 56.dp,
-                            isSelected = isPlaying,
-                            iconBytes = stationIcons[currentStation.faviconUrl]
-                        )
+                        if (isBookMode) {
+                            AudiobookBadgeIcon(
+                                size = 56.dp,
+                                isActive = isPlaying,
+                                isPlayed = currentAudiobook?.isPlayed == true
+                            )
+                        } else {
+                            StationLogo(
+                                station = currentStation,
+                                size = 56.dp,
+                                isSelected = isPlaying,
+                                iconBytes = stationIcons[currentStation.faviconUrl]
+                            )
+                        }
                         Spacer(modifier = Modifier.width(14.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -802,42 +838,53 @@ private fun PhoneRadioScreen(
                                 overflow = TextOverflow.Ellipsis
                             )
                             Text(
-                                text = currentStation.name,
+                                text = if (isBookMode) (currentAudiobook?.title ?: "Audiokniha") else currentStation.name,
                                 color = palette.goldAccent,
-                                fontSize = 22.sp,
+                                fontSize = 20.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis
                             )
+                            if (isBookMode && !currentAudiobook?.groupTitle.isNullOrBlank()) {
+                                Text(
+                                    text = currentAudiobook?.groupTitle.orEmpty(),
+                                    color = palette.secondaryText,
+                                    fontSize = 11.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                            }
                         }
                     }
 
                     Spacer(modifier = Modifier.height(12.dp))
 
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(12.dp))
-                            .background(palette.rdsBoxBg)
-                            .border(1.dp, palette.cardBorder, RoundedCornerShape(12.dp))
-                            .padding(horizontal = 12.dp, vertical = 10.dp)
-                    ) {
-                        Text(
-                            text = displayRds.ifEmpty { " " },
-                            color = palette.primaryText,
-                            fontSize = 15.sp,
-                            fontWeight = FontWeight.Medium,
-                            maxLines = 1,
+                    if (isBookMode) {
+                        AudiobookPlayerBox(
+                            palette = palette,
+                            positionMs = audiobookPositionMs,
+                            durationMs = audiobookDurationMs
+                        )
+                    } else {
+                        Box(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .then(
-                                    if (displayRds.isNotEmpty()) {
-                                        Modifier.basicMarquee(iterations = Int.MAX_VALUE)
-                                    } else {
-                                        Modifier
-                                    }
-                                )
-                        )
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(palette.rdsBoxBg)
+                                .border(1.dp, palette.cardBorder, RoundedCornerShape(12.dp))
+                                .padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Text(
+                                text = displayRds.ifEmpty { " " },
+                                color = palette.primaryText,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Medium,
+                                maxLines = 1,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .then(if (displayRds.isNotEmpty()) Modifier.basicMarquee(iterations = Int.MAX_VALUE) else Modifier)
+                            )
+                        }
                     }
                 }
             }
@@ -854,9 +901,8 @@ private fun PhoneRadioScreen(
                         for (col in 0 until 2) {
                             val index = row * 2 + col
                             val presetStation = presets.getOrNull(index)
-                            val isCurrentPreset = presetStation != null &&
+                            val isCurrentPreset = !isBookMode && presetStation != null &&
                                 (presetStation.id == currentStation.id || presetStation.name == currentStation.name)
-
                             GlassCardBox(
                                 modifier = Modifier
                                     .weight(1f)
@@ -901,10 +947,7 @@ private fun PhoneRadioScreen(
                                             modifier = Modifier.weight(1f)
                                         )
                                     } else {
-                                        Box(
-                                            modifier = Modifier.fillMaxSize(),
-                                            contentAlignment = Alignment.Center
-                                        ) {
+                                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                                             Text(
                                                 text = "+ Předvolba ${index + 1}",
                                                 color = palette.secondaryText,
@@ -922,6 +965,12 @@ private fun PhoneRadioScreen(
             }
 
             val mainBtnColor by animateColorAsState(if (isPlaying) StopRed else PlayGreen)
+            val mainBtnText = when {
+                isBookMode && isPlaying -> "⏸ POZASTAVIT KNIHU"
+                isBookMode && !isPlaying -> "▶ SPUSTIT KNIHU"
+                isPlaying -> "■ VYPNOUT RÁDIO"
+                else -> "▶ SPUSTIT RÁDIO"
+            }
             Box(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -933,7 +982,7 @@ private fun PhoneRadioScreen(
                 contentAlignment = Alignment.Center
             ) {
                 Text(
-                    text = if (isPlaying) "■ VYPNOUT RÁDIO" else "▶ SPUSTIT RÁDIO",
+                    text = mainBtnText,
                     color = Color.White,
                     fontSize = 16.sp,
                     fontWeight = FontWeight.ExtraBold,
@@ -964,7 +1013,7 @@ private fun PhoneRadioScreen(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "⏱ ČASOVAČ VYPNUTÍ",
+                                text = "ČASOVAČ VYPNUTÍ",
                                 color = palette.secondaryText,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -997,7 +1046,7 @@ private fun PhoneRadioScreen(
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
                             Text(
-                                text = "⏰ PŘEDBUZENÍ (-30 MIN)",
+                                text = "PŘEDBUZENÍ (-30 MIN)",
                                 color = palette.secondaryText,
                                 fontSize = 10.sp,
                                 fontWeight = FontWeight.Bold,
@@ -1076,7 +1125,7 @@ private fun PhoneRadioScreen(
             containerColor = palette.dialogBg,
             titleContentColor = palette.cyanAccent,
             textContentColor = palette.primaryText,
-            title = { Text("Kvalita streamu – ${st.name}", fontSize = 17.sp, fontWeight = FontWeight.Bold) },
+            title = { Text("Kvalita streamu — ${st.name}", fontSize = 17.sp, fontWeight = FontWeight.Bold) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     st.variants.forEach { variant ->
@@ -1140,15 +1189,9 @@ fun StationLogo(
             RadioController.requestStationIcon(station.faviconUrl)
         }
     }
-
     val decodedBitmap = remember(iconBytes) {
-        if (iconBytes != null && iconBytes.isNotEmpty()) {
-            decodeByteArrayToImageBitmap(iconBytes)
-        } else {
-            null
-        }
+        if (iconBytes != null && iconBytes.isNotEmpty()) decodeByteArrayToImageBitmap(iconBytes) else null
     }
-
     val initials = remember(station.name) { stationInitials(station.name) }
     val bgBrush = remember(station.id, isSelected) {
         if (isSelected) {
@@ -1157,9 +1200,7 @@ fun StationLogo(
             Brush.linearGradient(listOf(Color(0xFF1A3A54), Color(0xFF0F2537)))
         }
     }
-
     val cornerShape = RoundedCornerShape(size * 0.26f)
-
     Box(
         modifier = Modifier
             .size(size)
@@ -1213,17 +1254,4 @@ private fun stationInitials(name: String): String {
         cleaned.isNotEmpty() -> cleaned.take(2).uppercase()
         else -> "PM"
     }
-}
-
-private fun normalizeSearchText(input: String): String {
-    val map = mapOf(
-        'á' to 'a', 'č' to 'c', 'ď' to 'd', 'é' to 'e', 'ě' to 'e',
-        'í' to 'i', 'ň' to 'n', 'ó' to 'o', 'ř' to 'r', 'š' to 's',
-        'ť' to 't', 'ú' to 'u', 'ů' to 'u', 'ý' to 'y', 'ž' to 'z'
-    )
-    val sb = StringBuilder(input.length)
-    for (ch in input.lowercase()) {
-        sb.append(map[ch] ?: ch)
-    }
-    return sb.toString()
 }

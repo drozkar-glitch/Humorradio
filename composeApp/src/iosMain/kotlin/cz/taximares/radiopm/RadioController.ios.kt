@@ -18,9 +18,16 @@ import platform.AVFAudio.AVAudioSessionRouteChangeReasonKey
 import platform.AVFAudio.setActive
 import platform.AVFoundation.AVPlayer
 import platform.AVFoundation.AVPlayerItem
+import platform.AVFoundation.AVPlayerItemDidPlayToEndTimeNotification
+import platform.AVFoundation.currentItem
+import platform.AVFoundation.currentTime
+import platform.AVFoundation.duration
 import platform.AVFoundation.pause
 import platform.AVFoundation.play
 import platform.AVFoundation.replaceCurrentItemWithPlayerItem
+import platform.AVFoundation.seekToTime
+import platform.CoreMedia.CMTimeGetSeconds
+import platform.CoreMedia.CMTimeMakeWithSeconds
 import platform.Foundation.NSData
 import platform.Foundation.NSJSONSerialization
 import platform.Foundation.NSNotificationCenter
@@ -30,6 +37,7 @@ import platform.Foundation.NSURL
 import platform.Foundation.NSUserDefaults
 import platform.Foundation.dataWithContentsOfURL
 import platform.darwin.DISPATCH_TIME_NOW
+import platform.darwin.NSEC_PER_MSEC
 import platform.darwin.NSEC_PER_SEC
 import platform.darwin.dispatch_after
 import platform.darwin.dispatch_async
@@ -63,6 +71,9 @@ actual object RadioController {
     private const val KEY_LAST_STATION_DATA = "last_station_data_v1"
     private const val KEY_PRESET_PREFIX = "saved_preset_v1_"
     private const val KEY_CACHED_STATIONS_IOS = "cached_stations_ios_v1"
+    private const val KEY_AUDIOBOOKS_IOS = "saved_audiobooks_ios_v1"
+    private const val KEY_LAST_AUDIOBOOK_ID = "last_audiobook_id_v1"
+    private const val KEY_LAST_MODE = "last_playback_mode_v1"
 
     private val DECIMAL_ENTITY_REGEX = Regex("&#(\\d+);")
     private val HEX_ENTITY_REGEX = Regex("&#[xX]([0-9a-fA-F]+);")
@@ -71,6 +82,7 @@ actual object RadioController {
     private var audioObserversRegistered = false
     private var wasPlayingBeforeInterruption = false
     private var rdsPollingActive = false
+    private var audiobookPollingActive = false
 
     private val WINDOWS_1250_TABLE = charArrayOf(
         '\u20AC', ' ', '\u201A', ' ', '\u201E', '\u2026', '\u2020', '\u2021',
@@ -135,10 +147,93 @@ actual object RadioController {
     private val _watchListScrollEvent = MutableStateFlow(0L to 0f)
     actual val watchListScrollEvent: StateFlow<Pair<Long, Float>> = _watchListScrollEvent.asStateFlow()
 
+    private val _playbackMode = MutableStateFlow(PlaybackMode.RADIO)
+    actual val playbackMode: StateFlow<PlaybackMode> = _playbackMode.asStateFlow()
+
+    private val _audiobooks = MutableStateFlow<List<AudiobookItem>>(emptyList())
+    actual val audiobooks: StateFlow<List<AudiobookItem>> = _audiobooks.asStateFlow()
+
+    private val _currentAudiobook = MutableStateFlow<AudiobookItem?>(null)
+    actual val currentAudiobook: StateFlow<AudiobookItem?> = _currentAudiobook.asStateFlow()
+
+    private val _audiobookPositionMs = MutableStateFlow(0L)
+    actual val audiobookPositionMs: StateFlow<Long> = _audiobookPositionMs.asStateFlow()
+
+    private val _audiobookDurationMs = MutableStateFlow(0L)
+    actual val audiobookDurationMs: StateFlow<Long> = _audiobookDurationMs.asStateFlow()
+
+    private val _isImportingAudiobooks = MutableStateFlow(false)
+    actual val isImportingAudiobooks: StateFlow<Boolean> = _isImportingAudiobooks.asStateFlow()
+
     init {
         loadCachedStationsFromDefaults()
         loadSavedStateFromDefaults()
+        loadAudiobooksFromDefaults()
         refreshOnlineStations()
+    }
+
+    private fun serializeAudiobook(item: AudiobookItem): String {
+        return listOf(
+            item.id.replace("\t", " ").replace("\n", " "),
+            item.title.replace("\t", " ").replace("\n", " "),
+            item.groupTitle.replace("\t", " ").replace("\n", " "),
+            item.sourceUri.replace("\t", "").replace("\n", ""),
+            item.zipEntryPath.replace("\t", "").replace("\n", ""),
+            item.extension.replace("\t", "").replace("\n", ""),
+            item.positionMs.toString(),
+            item.durationMs.toString(),
+            if (item.isPlayed) "1" else "0"
+        ).joinToString("\t")
+    }
+
+    private fun deserializeAudiobook(line: String): AudiobookItem? {
+        val p = line.split("\t")
+        if (p.size < 9) return null
+        val id = p[0].trim()
+        val title = p[1].trim()
+        val src = p[3].trim()
+        if (id.isEmpty() || title.isEmpty() || src.isEmpty()) return null
+        return AudiobookItem(
+            id = id,
+            title = title,
+            groupTitle = p[2].trim(),
+            sourceUri = src,
+            zipEntryPath = p[4].trim(),
+            extension = p[5].trim().ifEmpty { "mp3" },
+            positionMs = p[6].toLongOrNull() ?: 0L,
+            durationMs = p[7].toLongOrNull() ?: 0L,
+            isPlayed = p[8] == "1"
+        )
+    }
+
+    private fun saveAudiobooksToDefaults() {
+        val defs = NSUserDefaults.standardUserDefaults
+        val raw = _audiobooks.value.joinToString("\n") { serializeAudiobook(it) }
+        defs.setObject(raw, forKey = KEY_AUDIOBOOKS_IOS)
+        _currentAudiobook.value?.let { defs.setObject(it.id, forKey = KEY_LAST_AUDIOBOOK_ID) }
+        defs.setObject(_playbackMode.value.name, forKey = KEY_LAST_MODE)
+    }
+
+    private fun loadAudiobooksFromDefaults() {
+        val defs = NSUserDefaults.standardUserDefaults
+        val raw = defs.stringForKey(KEY_AUDIOBOOKS_IOS).orEmpty()
+        if (raw.isNotBlank()) {
+            val loaded = raw.split("\n").mapNotNull { line ->
+                val t = line.trim()
+                if (t.isNotEmpty()) deserializeAudiobook(t) else null
+            }
+            _audiobooks.value = loaded
+            val lastId = defs.stringForKey(KEY_LAST_AUDIOBOOK_ID)
+            val found = loaded.find { it.id == lastId } ?: loaded.firstOrNull()
+            _currentAudiobook.value = found
+            if (found != null) {
+                _audiobookPositionMs.value = found.positionMs
+                _audiobookDurationMs.value = found.durationMs
+            }
+        }
+        if (defs.stringForKey(KEY_LAST_MODE) == PlaybackMode.AUDIOBOOK.name && _currentAudiobook.value != null) {
+            _playbackMode.value = PlaybackMode.AUDIOBOOK
+        }
     }
 
     private fun serializeStation(st: RadioStation): String {
@@ -169,7 +264,6 @@ actual object RadioController {
         val faviconUrl = parts.getOrNull(4)?.trim().orEmpty()
         val qualityLabel = parts.getOrNull(5)?.trim()?.ifEmpty { "128 kbps" } ?: "128 kbps"
         val variantsRaw = parts.getOrNull(6)?.trim().orEmpty()
-
         val parsedVariants = mutableListOf<StreamVariant>()
         if (variantsRaw.isNotEmpty()) {
             for (vToken in variantsRaw.split(";;")) {
@@ -184,7 +278,6 @@ actual object RadioController {
                 }
             }
         }
-
         val fromAll = _allStations.value.find { it.id == id || it.name.equals(name, ignoreCase = true) }
         return if (fromAll != null) {
             fromAll.copy(
@@ -202,9 +295,7 @@ actual object RadioController {
                 backupUrl = backupUrl,
                 faviconUrl = faviconUrl,
                 qualityLabel = qualityLabel,
-                variants = parsedVariants.ifEmpty {
-                    listOf(StreamVariant(qualityLabel, streamUrl))
-                }
+                variants = parsedVariants.ifEmpty { listOf(StreamVariant(qualityLabel, streamUrl)) }
             )
         }
     }
@@ -221,12 +312,9 @@ actual object RadioController {
         try {
             val raw = NSUserDefaults.standardUserDefaults.stringForKey(KEY_CACHED_STATIONS_IOS)
             if (raw.isNullOrBlank()) return
-            val loaded = mutableListOf<RadioStation>()
-            for (line in raw.split("\n")) {
-                val trimmed = line.trim()
-                if (trimmed.isNotEmpty()) {
-                    deserializeStation(trimmed)?.let { loaded.add(it) }
-                }
+            val loaded = raw.split("\n").mapNotNull { line ->
+                val t = line.trim()
+                if (t.isNotEmpty()) deserializeStation(t) else null
             }
             if (loaded.isNotEmpty()) {
                 _allStations.value = mergeStationsWithDefaults(loaded)
@@ -239,6 +327,7 @@ actual object RadioController {
         val defs = NSUserDefaults.standardUserDefaults
         defs.setObject(station.id, forKey = KEY_LAST_STATION_ID)
         defs.setObject(serializeStation(station), forKey = KEY_LAST_STATION_DATA)
+        defs.setObject(PlaybackMode.RADIO.name, forKey = KEY_LAST_MODE)
     }
 
     private fun saveAllPresetsToDefaults() {
@@ -256,7 +345,6 @@ actual object RadioController {
 
     private fun loadSavedStateFromDefaults() {
         val defs = NSUserDefaults.standardUserDefaults
-
         val loadedPresets = MutableList<RadioStation?>(4) { null }
         for (i in 0..3) {
             val rawPreset = defs.stringForKey("$KEY_PRESET_PREFIX$i")
@@ -274,9 +362,7 @@ actual object RadioController {
         if (restored == null) {
             val lastId = defs.stringForKey(KEY_LAST_STATION_ID)
             if (!lastId.isNullOrBlank()) {
-                restored = _allStations.value.find {
-                    it.id == lastId || it.name.equals(lastId, ignoreCase = true)
-                }
+                restored = _allStations.value.find { it.id == lastId || it.name.equals(lastId, ignoreCase = true) }
             }
         }
         if (restored != null) {
@@ -303,7 +389,6 @@ actual object RadioController {
 
         val buckets = mutableListOf<IosStationGroupBucket>()
         val bucketIndexByName = mutableListOf<Pair<String, Int>>()
-
         for (element in jsonArray) {
             val obj = element as? kotlin.collections.Map<*, *> ?: continue
             val name = (obj["name"] as? String)?.trim().orEmpty()
@@ -316,13 +401,9 @@ actual object RadioController {
             val favicon = (obj["favicon"] as? String)?.trim().orEmpty()
 
             if (name.isEmpty() || streamUrl.isEmpty()) continue
-            if (codec.contains("UNKNOWN") ||
-                streamUrl.endsWith(".asx", ignoreCase = true) ||
-                streamUrl.endsWith(".wma", ignoreCase = true)
-            ) {
+            if (codec.contains("UNKNOWN") || streamUrl.endsWith(".asx", ignoreCase = true) || streamUrl.endsWith(".wma", ignoreCase = true)) {
                 continue
             }
-
             val cleanName = cleanStationGroupName(name)
             val existingIdx = bucketIndexByName.firstOrNull { it.first.equals(cleanName, ignoreCase = true) }?.second
             val bucket = if (existingIdx != null) {
@@ -340,22 +421,15 @@ actual object RadioController {
         var stationCounter = 0
         for (bucket in buckets) {
             stationCounter++
-            val uniqueStreams = bucket.items.distinctBy { it.streamUrl }
-            val sorted = uniqueStreams.sortedByDescending { it.bitrate }
+            val sorted = bucket.items.distinctBy { it.streamUrl }.sortedByDescending { it.bitrate }
             val primary = sorted.first()
             val backup = sorted.getOrNull(1)?.streamUrl ?: ""
             val icon = sorted.firstOrNull { it.favicon.isNotEmpty() }?.favicon ?: ""
-
             val variants = sorted.mapIndexed { idx, item ->
                 val br = item.bitrate
-                val label = if (sorted.count { it.bitrate == br } > 1) {
-                    "${br} kbps (#${idx + 1})"
-                } else {
-                    "${br} kbps"
-                }
+                val label = if (sorted.count { it.bitrate == br } > 1) "${br} kbps (#${idx + 1})" else "${br} kbps"
                 StreamVariant(label = label, url = item.streamUrl, bitrate = br)
             }
-
             val slug = bucket.name.lowercase().replace(Regex("[^a-z0-9]+"), "_").trim('_')
             val id = if (slug.isNotEmpty()) "online_$slug" else "online_st_$stationCounter"
             result.add(
@@ -376,7 +450,6 @@ actual object RadioController {
     private fun mergeStationsWithDefaults(online: List<RadioStation>): List<RadioStation> {
         val result = mutableListOf<RadioStation>()
         val usedOnlineIndices = mutableSetOf<Int>()
-
         for (def in defaultCzechStations) {
             val matchIdx = online.indexOfFirst {
                 it.name.equals(def.name, ignoreCase = true) ||
@@ -398,21 +471,14 @@ actual object RadioController {
                 result.add(def)
             }
         }
-
         for (i in online.indices) {
-            if (i !in usedOnlineIndices) {
-                result.add(online[i])
-            }
+            if (i !in usedOnlineIndices) result.add(online[i])
         }
         return result
     }
 
     private fun mapWin1250IfInLatin1Range(codePoint: Int): Char {
-        return if (codePoint in 0x80..0xFF) {
-            WINDOWS_1250_TABLE[codePoint - 0x80]
-        } else {
-            codePoint.toChar()
-        }
+        return if (codePoint in 0x80..0xFF) WINDOWS_1250_TABLE[codePoint - 0x80] else codePoint.toChar()
     }
 
     private fun decodeCzechRdsBytes(bytes: ByteArray): String {
@@ -421,9 +487,8 @@ actual object RadioController {
         var i = 0
         while (i < bytes.size) {
             val b0 = bytes[i].toInt() and 0xFF
-            if (b0 == 0) {
-                break
-            } else if (b0 < 0x80) {
+            if (b0 == 0) break
+            else if (b0 < 0x80) {
                 sb.append(b0.toChar())
                 i++
             } else if (b0 in 0xC2..0xDF && i + 1 < bytes.size) {
@@ -452,34 +517,7 @@ actual object RadioController {
                 i++
             }
         }
-        return cleanAndRepairCzechText(sb.toString())
-    }
-
-    private fun fixCzechRdsEncoding(input: String): String {
-        if (input.isEmpty()) return ""
-        val sb = StringBuilder(input.length)
-        val byteBuffer = ArrayList<Byte>()
-
-        fun flushBytes() {
-            if (byteBuffer.isNotEmpty()) {
-                val arr = ByteArray(byteBuffer.size) { idx -> byteBuffer[idx] }
-                sb.append(decodeCzechRdsBytes(arr))
-                byteBuffer.clear()
-            }
-        }
-
-        for (ch in input) {
-            val code = ch.code
-            if (code in 0x80..0xFF) {
-                byteBuffer.add(code.toByte())
-            } else {
-                flushBytes()
-                sb.append(ch)
-            }
-        }
-        flushBytes()
-
-        return cleanAndRepairCzechText(sb.toString())
+        return decodeHtmlEntities(sb.toString()).replace(Regex("\\s+"), " ").trim()
     }
 
     private fun decodeHtmlEntities(input: String): String {
@@ -491,127 +529,17 @@ actual object RadioController {
             .replace("&#39;", "'")
             .replace("&apos;", "'")
             .replace("&nbsp;", " ")
-            .replace("&lt;", "<")
-            .replace("&gt;", ">")
-            .replace("&ndash;", "–")
-            .replace("&mdash;", "—")
-            .replace("&aacute;", "á").replace("&Aacute;", "Á")
-            .replace("&eacute;", "é").replace("&Eacute;", "É")
-            .replace("&ecaron;", "ě").replace("&Ecaron;", "Ě")
-            .replace("&iacute;", "í").replace("&Iacute;", "Í")
-            .replace("&oacute;", "ó").replace("&Oacute;", "Ó")
-            .replace("&uacute;", "ú").replace("&Uacute;", "Ú")
-            .replace("&uring;", "ů").replace("&Uring;", "Ů")
-            .replace("&yacute;", "ý").replace("&Yacute;", "Ý")
-            .replace("&ccaron;", "č").replace("&Ccaron;", "Č")
-            .replace("&dcaron;", "ď").replace("&Dcaron;", "Ď")
-            .replace("&ncaron;", "ň").replace("&Ncaron;", "Ň")
-            .replace("&rcaron;", "ř").replace("&Rcaron;", "Ř")
-            .replace("&scaron;", "š").replace("&Scaron;", "Š")
-            .replace("&tcaron;", "ť").replace("&Tcaron;", "Ť")
-            .replace("&zcaron;", "ž").replace("&Zcaron;", "Ž")
-
         if (s.contains("&#")) {
-            s = DECIMAL_ENTITY_REGEX.replace(s) { matchResult ->
-                val code = matchResult.groupValues[1].toIntOrNull()
-                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else matchResult.value
+            s = DECIMAL_ENTITY_REGEX.replace(s) { m ->
+                val code = m.groupValues[1].toIntOrNull()
+                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else m.value
             }
-            s = HEX_ENTITY_REGEX.replace(s) { matchResult ->
-                val code = matchResult.groupValues[1].toIntOrNull(16)
-                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else matchResult.value
+            s = HEX_ENTITY_REGEX.replace(s) { m ->
+                val code = m.groupValues[1].toIntOrNull(16)
+                if (code != null && code in 32..0x10FFFF) code.toChar().toString() else m.value
             }
         }
         return s
-    }
-
-    private fun remapResidualLatin1ToWin1250(input: String): String {
-        var needsRemap = false
-        for (ch in input) {
-            if (ch.code in 0x80..0xFF && WINDOWS_1250_TABLE[ch.code - 0x80] != ch) {
-                needsRemap = true
-                break
-            }
-        }
-        if (!needsRemap) return input
-        val sb = StringBuilder(input.length)
-        for (ch in input) {
-            if (ch.code in 0x80..0xFF) {
-                sb.append(WINDOWS_1250_TABLE[ch.code - 0x80])
-            } else {
-                sb.append(ch)
-            }
-        }
-        return sb.toString()
-    }
-
-    private fun cleanAndRepairCzechText(input: String): String {
-        if (input.isEmpty()) return ""
-        var s = input
-            .replace("Ăˇ", "á").replace("Ă\u0081", "Á")
-            .replace("ÄŤ", "č").replace("ÄŚ", "Č")
-            .replace("ÄŹ", "ď").replace("ÄŽ", "Ď")
-            .replace("Ă©", "é").replace("Ă‰", "É")
-            .replace("Ä›", "ě").replace("Äš", "Ě")
-            .replace("Ă­", "í").replace("ĂŤ", "Í")
-            .replace("Ĺˆ", "ň").replace("Ĺ‡", "Ň")
-            .replace("Ăł", "ó").replace("Ă“", "Ó")
-            .replace("Ĺ™", "ř").replace("Ĺ\u0098", "Ř")
-            .replace("Ĺˇ", "š").replace("Ĺ ", "Š")
-            .replace("ĹĄ", "ť").replace("Ĺ¤", "Ť")
-            .replace("Ăş", "ú").replace("Ăš", "Ú")
-            .replace("ĹŻ", "ů").replace("Ĺ®", "Ů")
-            .replace("Ă˝", "ý").replace("Ăť", "Ý")
-            .replace("Ĺľ", "ž").replace("Ĺ˝", "Ž")
-
-        s = decodeHtmlEntities(s)
-        s = remapResidualLatin1ToWin1250(s)
-
-        if (s.contains('\uFFFD')) {
-            s = repairServerReplacementChars(s)
-        }
-        return s.replace(Regex("\\s+"), " ").trim()
-    }
-
-    private fun repairServerReplacementChars(text: String): String {
-        val s = text
-            .replace("R\uFFFDdio", "Rádio")
-            .replace("r\uFFFDdio", "rádio")
-            .replace("Kdy\uFFFD", "Když")
-            .replace("kdy\uFFFD", "když")
-            .replace("v\uFFFDdy", "vždy")
-            .replace("V\uFFFDdy", "Vždy")
-            .replace("l\uFFFDska", "láska")
-            .replace("L\uFFFDska", "Láska")
-            .replace("p\uFFFDsnič", "písnič")
-            .replace("P\uFFFDsnič", "Písnič")
-            .replace("je\uFFFDtě", "ještě")
-            .replace("Je\uFFFDtě", "Ještě")
-
-        val hardConsonants = setOf('b', 'd', 'f', 'g', 'h', 'k', 'l', 'm', 'n', 'p', 'r', 's', 't', 'v', 'z')
-        val softConsonants = setOf('c', 'č', 'ď', 'j', 'ň', 'ř', 'š', 'ť', 'ž')
-
-        val sb = StringBuilder(s.length)
-        var i = 0
-        while (i < s.length) {
-            val ch = s[i]
-            if (ch == '\uFFFD') {
-                val prev = if (i > 0) s[i - 1] else ' '
-                val next = if (i + 1 < s.length) s[i + 1] else ' '
-                val isEndOfWord = !next.isLetterOrDigit()
-                val prevLower = prev.lowercaseChar()
-                if (isEndOfWord && prevLower in hardConsonants) {
-                    sb.append(if (prev.isUpperCase()) 'Ý' else 'ý')
-                } else if (isEndOfWord && prevLower in softConsonants) {
-                    sb.append(if (prev.isUpperCase()) 'Í' else 'í')
-                } else if (prev.isLetter() && next.isLetter()) {
-                    sb.append(if (prev.isUpperCase() && next.isUpperCase()) 'Ý' else 'ý')
-                }
-            } else {
-                sb.append(ch)
-            }
-            i++
-        }
-        return sb.toString()
     }
 
     private fun startIosRdsPolling() {
@@ -621,12 +549,11 @@ actual object RadioController {
     }
 
     private fun scheduleNextIosRdsPoll() {
-        if (!_isPlaying.value) {
+        if (!_isPlaying.value || _playbackMode.value != PlaybackMode.RADIO) {
             rdsPollingActive = false
             return
         }
-        val station = _currentStation.value
-        val streamUrl = station.streamUrl
+        val streamUrl = _currentStation.value.streamUrl
         if (streamUrl.contains("stream.radiojar.com/")) {
             val mount = streamUrl.substringAfter("stream.radiojar.com/").substringBefore("?").substringBefore("/").trim()
             if (mount.isNotEmpty()) {
@@ -636,22 +563,19 @@ actual object RadioController {
                     val data: NSData? = nsUrl?.let { NSData.dataWithContentsOfURL(it) }
                     if (data != null && data.length.toInt() in 2..8192) {
                         val bytes = ByteArray(data.length.toInt())
-                        bytes.usePinned { pinned ->
-                            memcpy(pinned.addressOf(0), data.bytes, data.length)
-                        }
+                        bytes.usePinned { pinned -> memcpy(pinned.addressOf(0), data.bytes, data.length) }
                         val jsonStr = decodeCzechRdsBytes(bytes)
-                        val title = extractJsonField(jsonStr, "title")
-                        val artist = extractJsonField(jsonStr, "artist")
+                        val title = Regex("\"title\"\\s*:\\s*\"([^\"]*)\"").find(jsonStr)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+                        val artist = Regex("\"artist\"\\s*:\\s*\"([^\"]*)\"").find(jsonStr)?.groupValues?.getOrNull(1)?.trim().orEmpty()
                         val combined = when {
-                            artist.isNotEmpty() && title.isNotEmpty() -> "$artist – $title"
+                            artist.isNotEmpty() && title.isNotEmpty() -> "$artist — $title"
                             title.isNotEmpty() -> title
                             else -> ""
                         }
                         if (combined.isNotEmpty()) {
-                            val clean = fixCzechRdsEncoding(combined)
                             dispatch_async(dispatch_get_main_queue()) {
-                                if (_isPlaying.value) {
-                                    _rdsText.value = clean
+                                if (_isPlaying.value && _playbackMode.value == PlaybackMode.RADIO) {
+                                    _rdsText.value = combined
                                 }
                             }
                         }
@@ -659,24 +583,45 @@ actual object RadioController {
                 }
             }
         }
-
         val delay = dispatch_time(DISPATCH_TIME_NOW, (10L * NSEC_PER_SEC.toLong()))
-        dispatch_after(delay, dispatch_get_main_queue()) {
-            scheduleNextIosRdsPoll()
-        }
+        dispatch_after(delay, dispatch_get_main_queue()) { scheduleNextIosRdsPoll() }
     }
 
-    private fun extractJsonField(json: String, key: String): String {
-        val pattern = Regex("\"$key\"\\s*:\\s*\"([^\"]*)\"")
-        return pattern.find(json)?.groupValues?.getOrNull(1)?.trim().orEmpty()
+    private fun startAudiobookProgressPolling() {
+        if (audiobookPollingActive) return
+        audiobookPollingActive = true
+        scheduleNextAudiobookTick()
+    }
+
+    private fun scheduleNextAudiobookTick() {
+        if (!_isPlaying.value || _playbackMode.value != PlaybackMode.AUDIOBOOK) {
+            audiobookPollingActive = false
+            return
+        }
+        syncCurrentAudiobookProgress(persist = true)
+        val delay = dispatch_time(DISPATCH_TIME_NOW, (1000L * NSEC_PER_MSEC.toLong()))
+        dispatch_after(delay, dispatch_get_main_queue()) { scheduleNextAudiobookTick() }
+    }
+
+    private fun syncCurrentAudiobookProgress(persist: Boolean) {
+        val p = player ?: return
+        val curItem = _currentAudiobook.value ?: return
+        val posSec = CMTimeGetSeconds(p.currentTime())
+        val durSec = p.currentItem?.let { CMTimeGetSeconds(it.duration) } ?: 0.0
+        val posMs = if (!posSec.isNaN() && posSec.isFinite() && posSec >= 0.0) (posSec * 1000.0).toLong() else curItem.positionMs
+        val durMs = if (!durSec.isNaN() && durSec.isFinite() && durSec > 0.0) (durSec * 1000.0).toLong() else curItem.durationMs
+        _audiobookPositionMs.value = posMs
+        if (durMs > 0L) _audiobookDurationMs.value = durMs
+        val updated = curItem.copy(positionMs = posMs, durationMs = if (durMs > 0L) durMs else curItem.durationMs)
+        _currentAudiobook.value = updated
+        _audiobooks.value = _audiobooks.value.map { if (it.id == updated.id) updated else it }
+        if (persist) saveAudiobooksToDefaults()
     }
 
     private fun ensureAudioObservers() {
         if (audioObserversRegistered) return
         audioObserversRegistered = true
-
         val center = NSNotificationCenter.defaultCenter
-
         center.addObserverForName(
             name = AVAudioSessionInterruptionNotification,
             `object` = null,
@@ -684,31 +629,63 @@ actual object RadioController {
         ) { notification ->
             val typeNum = notification?.userInfo?.get(AVAudioSessionInterruptionTypeKey) as? NSNumber
             val typeVal = typeNum?.unsignedLongValue ?: 0uL
-            if (typeVal == 1uL) {
-                if (_isPlaying.value) {
-                    wasPlayingBeforeInterruption = true
-                    player?.pause()
-                    _isPlaying.value = false
-                    _statusMessage.value = "Pozastaveno (hovor)"
-                }
-            } else if (typeVal == 0uL) {
-                if (wasPlayingBeforeInterruption) {
-                    wasPlayingBeforeInterruption = false
+            if (typeVal == 1uL && _isPlaying.value) {
+                wasPlayingBeforeInterruption = true
+                if (_playbackMode.value == PlaybackMode.AUDIOBOOK) syncCurrentAudiobookProgress(persist = true)
+                player?.pause()
+                _isPlaying.value = false
+                _statusMessage.value = "Pozastaveno (hovor)"
+            } else if (typeVal == 0uL && wasPlayingBeforeInterruption) {
+                wasPlayingBeforeInterruption = false
+                if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+                    _currentAudiobook.value?.let { selectAndPlayAudiobook(it) }
+                } else {
                     playStation(_currentStation.value)
                 }
             }
         }
-
         center.addObserverForName(
             name = AVAudioSessionRouteChangeNotification,
             `object` = null,
             queue = NSOperationQueue.mainQueue
         ) { notification ->
             val reasonNum = notification?.userInfo?.get(AVAudioSessionRouteChangeReasonKey) as? NSNumber
-            val reasonVal = reasonNum?.unsignedLongValue ?: 0uL
-            if (reasonVal == 2uL && _isPlaying.value) {
+            if ((reasonNum?.unsignedLongValue ?: 0uL) == 2uL && _isPlaying.value) {
                 player?.play()
             }
+        }
+        center.addObserverForName(
+            name = AVPlayerItemDidPlayToEndTimeNotification,
+            `object` = null,
+            queue = NSOperationQueue.mainQueue
+        ) { _ ->
+            if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+                onAudiobookFinished()
+            }
+        }
+    }
+
+    private fun onAudiobookFinished() {
+        val finished = _currentAudiobook.value ?: return
+        val list = _audiobooks.value
+        val idx = list.indexOfFirst { it.id == finished.id }
+        val marked = finished.copy(positionMs = 0L, isPlayed = true)
+        val newList = list.map { if (it.id == marked.id) marked else it }
+        _audiobooks.value = newList
+        _currentAudiobook.value = marked
+        _audiobookPositionMs.value = 0L
+        saveAudiobooksToDefaults()
+
+        val nextCandidate = if (idx >= 0 && idx + 1 < newList.size) {
+            newList.subList(idx + 1, newList.size).firstOrNull { !it.isPlayed } ?: newList.getOrNull(idx + 1)
+        } else {
+            null
+        }
+        if (nextCandidate != null && !nextCandidate.isPlayed) {
+            selectAndPlayAudiobook(nextCandidate)
+        } else {
+            _isPlaying.value = false
+            _statusMessage.value = "Audiokniha dohrána"
         }
     }
 
@@ -717,9 +694,7 @@ actual object RadioController {
     }
 
     actual fun onRotaryScroll(delta: Float) {
-        if (_isWatchStationListOpen.value) {
-            _watchListScrollEvent.value = 1L to delta
-        }
+        if (_isWatchStationListOpen.value) _watchListScrollEvent.value = 1L to delta
     }
 
     actual fun adjustVolume(direction: Int) {
@@ -727,6 +702,19 @@ actual object RadioController {
     }
 
     actual fun togglePlayback() {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            val cur = _currentAudiobook.value
+            if (_isPlaying.value) {
+                wasPlayingBeforeInterruption = false
+                syncCurrentAudiobookProgress(persist = true)
+                player?.pause()
+                _isPlaying.value = false
+                _statusMessage.value = "Pozastaveno"
+            } else if (cur != null) {
+                selectAndPlayAudiobook(cur)
+            }
+            return
+        }
         if (_isPlaying.value) {
             wasPlayingBeforeInterruption = false
             rdsPollingActive = false
@@ -740,6 +728,15 @@ actual object RadioController {
     }
 
     actual fun playNextStation() {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            val list = _audiobooks.value
+            if (list.isEmpty()) return
+            val curId = _currentAudiobook.value?.id
+            val idx = list.indexOfFirst { it.id == curId }
+            val next = if (idx in list.indices) list[(idx + 1) % list.size] else list.first()
+            selectAndPlayAudiobook(next)
+            return
+        }
         val favs = _presets.value.filterNotNull()
         val list = if (favs.isNotEmpty()) favs else _allStations.value
         if (list.isEmpty()) return
@@ -750,6 +747,15 @@ actual object RadioController {
     }
 
     actual fun playPreviousStation() {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK) {
+            val list = _audiobooks.value
+            if (list.isEmpty()) return
+            val curId = _currentAudiobook.value?.id
+            val idx = list.indexOfFirst { it.id == curId }
+            val prev = if (idx in list.indices) list[(idx - 1 + list.size) % list.size] else list.last()
+            selectAndPlayAudiobook(prev)
+            return
+        }
         val favs = _presets.value.filterNotNull()
         val list = if (favs.isNotEmpty()) favs else _allStations.value
         if (list.isEmpty()) return
@@ -760,11 +766,13 @@ actual object RadioController {
     }
 
     actual fun selectAndPlayStation(station: RadioStation) {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK && _isPlaying.value) {
+            syncCurrentAudiobookProgress(persist = true)
+        }
+        _playbackMode.value = PlaybackMode.RADIO
         _currentStation.value = station
         saveLastStationToDefaults(station)
-        if (station.faviconUrl.isNotBlank()) {
-            requestStationIcon(station.faviconUrl)
-        }
+        if (station.faviconUrl.isNotBlank()) requestStationIcon(station.faviconUrl)
         playStation(station)
     }
 
@@ -777,9 +785,7 @@ actual object RadioController {
             if (it != null && (it.id == station.id || it.name.equals(station.name, ignoreCase = true))) updated else it
         }
         saveAllPresetsToDefaults()
-        _currentStation.value = updated
-        saveLastStationToDefaults(updated)
-        playStation(updated)
+        selectAndPlayStation(updated)
     }
 
     private fun playStation(station: RadioStation) {
@@ -790,20 +796,159 @@ actual object RadioController {
             session.setActive(true, error = null)
         } catch (_: Exception) {
         }
-
         val nsUrl = NSURL.URLWithString(station.streamUrl) ?: return
         val item = AVPlayerItem.playerItemWithURL(nsUrl)
-        if (player == null) {
-            player = AVPlayer.playerWithPlayerItem(item)
-        } else {
-            player?.replaceCurrentItemWithPlayerItem(item)
-        }
+        if (player == null) player = AVPlayer.playerWithPlayerItem(item) else player?.replaceCurrentItemWithPlayerItem(item)
         player?.play()
+        _playbackMode.value = PlaybackMode.RADIO
         _isPlaying.value = true
         _statusMessage.value = "Hraje: ${station.name}"
         _rdsText.value = ""
         saveLastStationToDefaults(station)
         startIosRdsPolling()
+    }
+
+    actual fun pickAudiobookFiles() {
+        _isImportingAudiobooks.value = true
+        AudiobookStorageIos.pickFilesOrZip { imported ->
+            mergeImportedAudiobooks(imported)
+            _isImportingAudiobooks.value = false
+        }
+    }
+
+    actual fun pickAudiobookFolder() {
+        _isImportingAudiobooks.value = true
+        AudiobookStorageIos.pickFolder { imported ->
+            mergeImportedAudiobooks(imported)
+            _isImportingAudiobooks.value = false
+        }
+    }
+
+    private fun mergeImportedAudiobooks(imported: List<AudiobookItem>) {
+        if (imported.isEmpty()) return
+        val existingById = _audiobooks.value.associateBy { it.id }
+        val merged = _audiobooks.value.toMutableList()
+        for (item in imported) {
+            if (!existingById.containsKey(item.id)) {
+                merged.add(item)
+            }
+        }
+        _audiobooks.value = merged
+        if (_currentAudiobook.value == null) {
+            _currentAudiobook.value = merged.firstOrNull()
+        }
+        saveAudiobooksToDefaults()
+    }
+
+    actual fun selectAndPlayAudiobook(item: AudiobookItem) {
+        if (_playbackMode.value == PlaybackMode.AUDIOBOOK && _isPlaying.value && _currentAudiobook.value?.id != item.id) {
+            syncCurrentAudiobookProgress(persist = true)
+        }
+        ensureAudioObservers()
+        val latest = _audiobooks.value.find { it.id == item.id } ?: item
+        val startPosMs = if (latest.isPlayed && latest.positionMs <= 0L) 0L else latest.positionMs
+        val preparedItem = if (latest.isPlayed && startPosMs == 0L) latest.copy(isPlayed = false) else latest
+
+        _playbackMode.value = PlaybackMode.AUDIOBOOK
+        _currentAudiobook.value = preparedItem
+        _audiobookPositionMs.value = startPosMs
+        _audiobookDurationMs.value = preparedItem.durationMs
+        _audiobooks.value = _audiobooks.value.map { if (it.id == preparedItem.id) preparedItem else it }
+        _statusMessage.value = "Načítám: ${preparedItem.title}..."
+        rdsPollingActive = false
+        _rdsText.value = ""
+
+        dispatch_async(dispatch_get_global_queue(0, 0u)) {
+            val localPath = AudiobookStorageIos.resolvePlayablePath(preparedItem)
+            dispatch_async(dispatch_get_main_queue()) {
+                if (localPath == null) {
+                    _isPlaying.value = false
+                    _statusMessage.value = "Soubor nelze otevřít"
+                    return@dispatch_async
+                }
+                try {
+                    val session = AVAudioSession.sharedInstance()
+                    session.setCategory(AVAudioSessionCategoryPlayback, error = null)
+                    session.setActive(true, error = null)
+                } catch (_: Exception) {
+                }
+                val fileUrl = NSURL.fileURLWithPath(localPath)
+                val avItem = AVPlayerItem.playerItemWithURL(fileUrl)
+                if (player == null) player = AVPlayer.playerWithPlayerItem(avItem) else player?.replaceCurrentItemWithPlayerItem(avItem)
+                if (startPosMs > 0L) {
+                    player?.seekToTime(CMTimeMakeWithSeconds(startPosMs.toDouble() / 1000.0, 1000))
+                }
+                player?.play()
+                _isPlaying.value = true
+                _statusMessage.value = "Audiokniha: ${preparedItem.title}"
+                saveAudiobooksToDefaults()
+                startAudiobookProgressPolling()
+            }
+        }
+    }
+
+    actual fun seekAudiobookTo(positionMs: Long) {
+        if (_playbackMode.value != PlaybackMode.AUDIOBOOK) return
+        val target = positionMs.coerceAtLeast(0L)
+        player?.seekToTime(CMTimeMakeWithSeconds(target.toDouble() / 1000.0, 1000))
+        _audiobookPositionMs.value = target
+        val cur = _currentAudiobook.value ?: return
+        val updated = cur.copy(positionMs = target)
+        _currentAudiobook.value = updated
+        _audiobooks.value = _audiobooks.value.map { if (it.id == updated.id) updated else it }
+        saveAudiobooksToDefaults()
+    }
+
+    actual fun seekAudiobookRelative(deltaMs: Long) {
+        val dur = _audiobookDurationMs.value
+        val raw = (_audiobookPositionMs.value + deltaMs).coerceAtLeast(0L)
+        val clamped = if (dur > 0L) raw.coerceAtMost(dur) else raw
+        seekAudiobookTo(clamped)
+    }
+
+    actual fun toggleAudiobookPlayed(itemId: String) {
+        val updatedList = _audiobooks.value.map { item ->
+            if (item.id == itemId) {
+                val nextPlayed = !item.isPlayed
+                item.copy(isPlayed = nextPlayed, positionMs = if (nextPlayed) 0L else item.positionMs)
+            } else {
+                item
+            }
+        }
+        _audiobooks.value = updatedList
+        _currentAudiobook.value = updatedList.find { it.id == _currentAudiobook.value?.id }
+        saveAudiobooksToDefaults()
+    }
+
+    actual fun removeAudiobook(itemId: String) {
+        val wasCurrent = _currentAudiobook.value?.id == itemId
+        if (wasCurrent && _playbackMode.value == PlaybackMode.AUDIOBOOK && _isPlaying.value) {
+            player?.pause()
+            _isPlaying.value = false
+            _statusMessage.value = "Připraveno k poslechu"
+        }
+        val remaining = _audiobooks.value.filterNot { it.id == itemId }
+        _audiobooks.value = remaining
+        if (wasCurrent) {
+            _currentAudiobook.value = remaining.firstOrNull()
+            _audiobookPositionMs.value = _currentAudiobook.value?.positionMs ?: 0L
+            _audiobookDurationMs.value = _currentAudiobook.value?.durationMs ?: 0L
+            if (remaining.isEmpty()) _playbackMode.value = PlaybackMode.RADIO
+        }
+        saveAudiobooksToDefaults()
+    }
+
+    actual fun removePlayedAudiobooks() {
+        val curId = _currentAudiobook.value?.id
+        val remaining = _audiobooks.value.filterNot { it.isPlayed && !(it.id == curId && _isPlaying.value) }
+        _audiobooks.value = remaining
+        if (_currentAudiobook.value != null && remaining.none { it.id == curId }) {
+            _currentAudiobook.value = remaining.firstOrNull()
+            _audiobookPositionMs.value = _currentAudiobook.value?.positionMs ?: 0L
+            _audiobookDurationMs.value = _currentAudiobook.value?.durationMs ?: 0L
+            if (remaining.isEmpty()) _playbackMode.value = PlaybackMode.RADIO
+        }
+        saveAudiobooksToDefaults()
     }
 
     actual fun saveCurrentToPreset(index: Int) {
@@ -821,7 +966,6 @@ actual object RadioController {
     actual fun refreshOnlineStations() {
         if (_isUpdatingStations.value) return
         _isUpdatingStations.value = true
-
         dispatch_async(dispatch_get_global_queue(0, 0u)) {
             val hosts = listOf(
                 "de1.api.radio-browser.info",
@@ -842,26 +986,11 @@ actual object RadioController {
                 } catch (_: Exception) {
                 }
             }
-
             dispatch_async(dispatch_get_main_queue()) {
                 if (fetched.isNotEmpty()) {
                     val merged = mergeStationsWithDefaults(fetched)
                     _allStations.value = merged
                     saveStationsToCache(merged)
-
-                    val cur = _currentStation.value
-                    val matched = merged.find { it.id == cur.id || it.name.equals(cur.name, ignoreCase = true) }
-                    if (matched != null) {
-                        val updatedCur = cur.copy(
-                            backupUrl = cur.backupUrl.ifBlank { matched.backupUrl },
-                            faviconUrl = cur.faviconUrl.ifBlank { matched.faviconUrl },
-                            variants = if (matched.variants.size > cur.variants.size) matched.variants else cur.variants
-                        )
-                        _currentStation.value = updatedCur
-                        if (updatedCur.faviconUrl.isNotBlank()) {
-                            requestStationIcon(updatedCur.faviconUrl)
-                        }
-                    }
                 }
                 _isUpdatingStations.value = false
             }
@@ -876,9 +1005,7 @@ actual object RadioController {
             val data: NSData? = nsUrl?.let { NSData.dataWithContentsOfURL(it) }
             if (data != null && data.length.toInt() in 1..(512 * 1024)) {
                 val bytes = ByteArray(data.length.toInt())
-                bytes.usePinned { pinned ->
-                    memcpy(pinned.addressOf(0), data.bytes, data.length)
-                }
+                bytes.usePinned { pinned -> memcpy(pinned.addressOf(0), data.bytes, data.length) }
                 dispatch_async(dispatch_get_main_queue()) {
                     _stationIcons.value = _stationIcons.value + (clean to bytes)
                 }

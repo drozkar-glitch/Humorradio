@@ -7,15 +7,50 @@ import android.view.MotionEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
 
 class MainActivity : ComponentActivity() {
+
+    private val pickFilesLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        RadioController.onPickedAudiobookFiles(uris)
+    }
+
+    private val pickFolderLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri ->
+        RadioController.onPickedAudiobookFolder(treeUri)
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         RadioController.init(applicationContext)
+        RadioController.bindFilePickers(
+            launchFiles = {
+                pickFilesLauncher.launch(
+                    arrayOf(
+                        "audio/*",
+                        "application/zip",
+                        "application/x-zip-compressed",
+                        "application/octet-stream",
+                        "*/*"
+                    )
+                )
+            },
+            launchFolder = {
+                pickFolderLauncher.launch(null)
+            }
+        )
         setContent {
             App()
         }
+    }
+
+    override fun onDestroy() {
+        RadioController.unbindFilePickers()
+        super.onDestroy()
     }
 
     override fun dispatchGenericMotionEvent(ev: MotionEvent): Boolean {

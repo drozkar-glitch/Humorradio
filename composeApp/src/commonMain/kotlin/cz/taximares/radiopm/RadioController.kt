@@ -3,6 +3,89 @@ package cz.taximares.radiopm
 import androidx.compose.ui.graphics.ImageBitmap
 import kotlinx.coroutines.flow.StateFlow
 
+enum class PlaybackMode {
+    RADIO,
+    AUDIOBOOK
+}
+
+data class AudiobookItem(
+    val id: String,
+    val title: String,
+    val groupTitle: String = "",
+    val sourceUri: String,
+    val zipEntryPath: String = "",
+    val extension: String = "mp3",
+    val positionMs: Long = 0L,
+    val durationMs: Long = 0L,
+    val isPlayed: Boolean = false
+)
+
+val SUPPORTED_AUDIO_EXTENSIONS: Set<String> = setOf(
+    "mp3", "m4b", "m4a", "aac", "mp4", "ogg", "oga",
+    "opus", "flac", "wav", "amr", "3gp", "webm", "mkv"
+)
+
+fun isSupportedAudioFileName(name: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase().trim()
+    return ext in SUPPORTED_AUDIO_EXTENSIONS
+}
+
+fun formatAudioDuration(ms: Long): String {
+    val totalSec = (ms.coerceAtLeast(0L)) / 1000L
+    val hours = totalSec / 3600L
+    val minutes = (totalSec % 3600L) / 60L
+    val seconds = totalSec % 60L
+    val mm = minutes.toString().padStart(2, '0')
+    val ss = seconds.toString().padStart(2, '0')
+    return if (hours > 0L) {
+        "$hours:$mm:$ss"
+    } else {
+        "$mm:$ss"
+    }
+}
+
+fun naturalCompareStrings(a: String, b: String): Int {
+    val s1 = a.lowercase()
+    val s2 = b.lowercase()
+    var i1 = 0
+    var i2 = 0
+    while (i1 < s1.length && i2 < s2.length) {
+        val c1 = s1[i1]
+        val c2 = s2[i2]
+        if (c1.isDigit() && c2.isDigit()) {
+            var start1 = i1
+            while (start1 < s1.length && s1[start1] == '0') start1++
+            var end1 = start1
+            while (end1 < s1.length && s1[end1].isDigit()) end1++
+
+            var start2 = i2
+            while (start2 < s2.length && s2[start2] == '0') start2++
+            var end2 = start2
+            while (end2 < s2.length && s2[end2].isDigit()) end2++
+
+            val lenDiff = (end1 - start1) - (end2 - start2)
+            if (lenDiff != 0) return lenDiff
+
+            var k1 = start1
+            var k2 = start2
+            while (k1 < end1 && k2 < end2) {
+                if (s1[k1] != s2[k2]) return s1[k1].compareTo(s2[k2])
+                k1++
+                k2++
+            }
+            val zeroDiff = (start1 - i1) - (start2 - i2)
+            if (zeroDiff != 0 && end1 == s1.length && end2 == s2.length) return zeroDiff
+            i1 = end1
+            i2 = end2
+        } else {
+            if (c1 != c2) return c1.compareTo(c2)
+            i1++
+            i2++
+        }
+    }
+    return s1.length.compareTo(s2.length)
+}
+
 data class StreamVariant(
     val label: String,
     val url: String,
@@ -212,7 +295,7 @@ expect object RadioController {
     val currentStation: StateFlow<RadioStation>
     val presets: StateFlow<List<RadioStation?>>
     val allStations: StateFlow<List<RadioStation>>
-    val stationIcons: StateFlow<Map<String, ByteArray>>
+    val stationIcons: StateFlow<kotlin.collections.Map<String, ByteArray>>
     val isUpdatingStations: StateFlow<Boolean>
     val sleepTimerRemainingMinutes: StateFlow<Int>
     val isPreAlarmEnabled: StateFlow<Boolean>
@@ -221,12 +304,20 @@ expect object RadioController {
     val isWatchStationListOpen: StateFlow<Boolean>
     val watchListScrollEvent: StateFlow<Pair<Long, Float>>
 
+    val playbackMode: StateFlow<PlaybackMode>
+    val audiobooks: StateFlow<List<AudiobookItem>>
+    val currentAudiobook: StateFlow<AudiobookItem?>
+    val audiobookPositionMs: StateFlow<Long>
+    val audiobookDurationMs: StateFlow<Long>
+    val isImportingAudiobooks: StateFlow<Boolean>
+
     fun togglePlayback()
     fun playNextStation()
     fun playPreviousStation()
     fun adjustVolume(direction: Int)
     fun setWatchStationListOpen(open: Boolean)
     fun onRotaryScroll(delta: Float)
+
     fun selectAndPlayStation(station: RadioStation)
     fun selectStationVariant(station: RadioStation, variant: StreamVariant)
     fun saveCurrentToPreset(index: Int)
@@ -235,4 +326,13 @@ expect object RadioController {
     fun requestStationIcon(url: String)
     fun cycleSleepTimer()
     fun toggleOneShotPreAlarm()
+
+    fun pickAudiobookFiles()
+    fun pickAudiobookFolder()
+    fun selectAndPlayAudiobook(item: AudiobookItem)
+    fun seekAudiobookTo(positionMs: Long)
+    fun seekAudiobookRelative(deltaMs: Long)
+    fun toggleAudiobookPlayed(itemId: String)
+    fun removeAudiobook(itemId: String)
+    fun removePlayedAudiobooks()
 }
