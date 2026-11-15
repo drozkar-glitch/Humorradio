@@ -6,6 +6,7 @@ import kotlinx.cinterop.alloc
 import kotlinx.cinterop.memScoped
 import kotlinx.cinterop.ptr
 import kotlinx.cinterop.sizeOf
+import kotlinx.cinterop.toKString
 import kotlinx.cinterop.usePinned
 import platform.Foundation.NSData
 import platform.Foundation.NSDocumentDirectory
@@ -37,7 +38,7 @@ import platform.zlib.inflateInit2_
 import platform.zlib.z_stream
 import platform.zlib.zlibVersion
 
-@OptIn(ExperimentalForeignApi::class)
+@OptIn(ExperimentalForeignApi::class, ExperimentalUnsignedTypes::class)
 internal object AudiobookStorageIos {
 
     private var activeDelegate: NSObject? = null
@@ -369,12 +370,18 @@ internal object AudiobookStorageIos {
 
     private fun inflateRawDeflate(compressed: ByteArray, expectedSize: Int): ByteArray? {
         if (compressed.isEmpty()) return ByteArray(0)
-        val outBytes = ByteArray(expectedSize.coerceAtLeast(compressed.size * 2).coerceAtLeast(4096))
+        val capacity = if (expectedSize > 0) {
+            expectedSize + 4096
+        } else {
+            (compressed.size * 4).coerceAtLeast(65536)
+        }
+        val outBytes = ByteArray(capacity)
         val uIn = compressed.asUByteArray()
         val uOut = outBytes.asUByteArray()
+        val zlibVerStr = zlibVersion()?.toKString()
         return memScoped {
             val strm = alloc<z_stream>()
-            if (inflateInit2_(strm.ptr, -15, zlibVersion(), sizeOf<z_stream>().toInt()) != Z_OK) {
+            if (inflateInit2_(strm.ptr, -15, zlibVerStr, sizeOf<z_stream>().toInt()) != Z_OK) {
                 return@memScoped null
             }
             try {
