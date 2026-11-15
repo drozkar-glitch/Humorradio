@@ -9,7 +9,7 @@ on:
 env:
   APP_NAME: "RadioPM"
   BUNDLE_ID: "cz.taximares.radiopm"
-  APP_VERSION: "1.2"
+  APP_VERSION: "1.3"
   PUBLISH_TO_STORES: "true"
   PUBLISH_GOOGLE: "true"
   PUBLISH_IOS: "true"
@@ -716,7 +716,7 @@ jobs:
               r = requests.get(url, headers=hdrs, timeout=30)
               if r.ok:
                   d = r.json(); raw = base64.b64decode(d["content"]).decode("utf-8")
-                  updated = re.sub(r'(APP_VERSION:\s*"[^"]*")', f'APP_VERSION: "{new_ver}"', raw)
+                  updated = re.sub(r'(APP_VERSION:\s*"[^"]*")', f'APP_VERSION: "1.3"', raw)
                   if updated != raw:
                       requests.put(url, headers=hdrs, json={"message": f"Automaticka aktualizace hlavni verze na {new_ver} [skip ci]", "content": base64.b64encode(updated.encode("utf-8")).decode("utf-8"), "sha": d["sha"]}, timeout=30)
           PYEOF
