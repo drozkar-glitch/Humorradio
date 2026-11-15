@@ -471,6 +471,15 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
     var stationForPresetDialog by remember { mutableStateOf<RadioStation?>(null) }
     var stationForQualityDialog by remember { mutableStateOf<RadioStation?>(null) }
 
+    val rightBadgeText = if (isBookMode) {
+        val ext = currentAudiobook?.extension?.uppercase() ?: "AUDIO"
+        if (currentAudiobook?.zipEntryPath?.isNotEmpty() == true) "$ext • ZIP" else ext
+    } else {
+        currentStation.qualityLabel
+    }
+
+    var headerTitleSizeSp by remember(isBookMode, rightBadgeText) { mutableStateOf(17f) }
+
     LaunchedEffect(currentStation.faviconUrl) {
         if (currentStation.faviconUrl.isNotBlank()) {
             RadioController.requestStationIcon(currentStation.faviconUrl)
@@ -690,7 +699,7 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                                                     .background(palette.goldAccent.copy(alpha = 0.18f))
                                                     .clickable { stationForPresetDialog = station }
                                                     .padding(horizontal = 8.dp, vertical = 5.dp)
-                                            ) {
+                                                ) {
                                                 Text(
                                                     text = "Předvolba",
                                                     color = palette.goldAccent,
@@ -730,20 +739,20 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                     backgroundColor = palette.cardBg
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Text(
                             text = "☰",
                             color = palette.goldAccent,
-                            fontSize = 15.sp,
+                            fontSize = 14.sp,
                             fontWeight = FontWeight.Bold
                         )
-                        Spacer(modifier = Modifier.width(6.dp))
+                        Spacer(modifier = Modifier.width(5.dp))
                         Text(
                             text = if (isBookMode) "Audioknihy" else "Stanice",
                             color = palette.primaryText,
-                            fontSize = 13.sp,
+                            fontSize = 12.sp,
                             fontWeight = FontWeight.SemiBold,
                             maxLines = 1,
                             softWrap = false
@@ -754,22 +763,21 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                 Text(
                     text = "RÁDIO PM",
                     color = palette.goldAccent,
-                    fontSize = 18.sp,
+                    fontSize = headerTitleSizeSp.sp,
                     fontWeight = FontWeight.ExtraBold,
                     maxLines = 1,
                     softWrap = false,
+                    overflow = TextOverflow.Visible,
                     textAlign = TextAlign.Center,
+                    onTextLayout = { layoutResult ->
+                        if (layoutResult.hasVisualOverflow && headerTitleSizeSp > 11f) {
+                            headerTitleSizeSp -= 0.5f
+                        }
+                    },
                     modifier = Modifier
                         .weight(1f)
-                        .padding(horizontal = 8.dp)
+                        .padding(horizontal = 4.dp)
                 )
-
-                val rightBadgeText = if (isBookMode) {
-                    val ext = currentAudiobook?.extension?.uppercase() ?: "AUDIO"
-                    if (currentAudiobook?.zipEntryPath?.isNotEmpty() == true) "$ext • ZIP" else ext
-                } else {
-                    currentStation.qualityLabel
-                }
 
                 GlassCardBox(
                     modifier = Modifier.clickable {
@@ -788,11 +796,11 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                     Text(
                         text = rightBadgeText,
                         color = palette.cyanAccent,
-                        fontSize = 13.sp,
+                        fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
                         maxLines = 1,
                         softWrap = false,
-                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp)
+                        modifier = Modifier.padding(horizontal = 9.dp, vertical = 7.dp)
                     )
                 }
             }
@@ -843,7 +851,9 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                                 fontSize = 20.sp,
                                 fontWeight = FontWeight.ExtraBold,
                                 maxLines = 1,
-                                overflow = TextOverflow.Ellipsis
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .basicMarquee(iterations = Int.MAX_VALUE)
                             )
                             if (isBookMode && !currentAudiobook?.groupTitle.isNullOrBlank()) {
                                 Text(
