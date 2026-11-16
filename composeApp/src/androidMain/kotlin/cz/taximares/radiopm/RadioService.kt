@@ -71,6 +71,7 @@ class RadioService : Service() {
         const val EXTRA_AUDIOBOOK_ZIP_ENTRY = "extra_audiobook_zip_entry"
         const val EXTRA_AUDIOBOOK_EXT = "extra_audiobook_ext"
         const val EXTRA_AUDIOBOOK_START_POS = "extra_audiobook_start_pos"
+        const val EXTRA_AUDIOBOOK_COVER_KEY = "extra_audiobook_cover_key"
         const val EXTRA_SEEK_POSITION_MS = "extra_seek_position_ms"
 
         private const val CHANNEL_ID = "radiopm_playback_channel_v3"
@@ -648,13 +649,12 @@ class RadioService : Service() {
 
     private fun cleanAndRepairCzechText(input: String): String {
         if (input.isEmpty()) return ""
-        var s = decodeHtmlEntities(input)
+        val s = decodeHtmlEntities(input)
         val sb = StringBuilder(s.length)
         for (ch in s) {
             if (ch.code in 0x80..0xFF) sb.append(WINDOWS_1250_TABLE[ch.code - 0x80]) else sb.append(ch)
         }
-        s = sb.toString()
-        return s.replace(Regex("\\s+"), " ").trim()
+        return sb.toString().replace(Regex("\\s+"), " ").trim()
     }
 
     private fun initExoPlayer() {
@@ -840,7 +840,8 @@ class RadioService : Service() {
                     sourceUri = intent.getStringExtra(EXTRA_AUDIOBOOK_URI).orEmpty(),
                     zipEntryPath = intent.getStringExtra(EXTRA_AUDIOBOOK_ZIP_ENTRY).orEmpty(),
                     extension = intent.getStringExtra(EXTRA_AUDIOBOOK_EXT) ?: "mp3",
-                    positionMs = intent.getLongExtra(EXTRA_AUDIOBOOK_START_POS, 0L)
+                    positionMs = intent.getLongExtra(EXTRA_AUDIOBOOK_START_POS, 0L),
+                    coverKey = intent.getStringExtra(EXTRA_AUDIOBOOK_COVER_KEY).orEmpty()
                 )
                 userRequestedStop = false
                 pausedByCall = false
@@ -849,9 +850,7 @@ class RadioService : Service() {
                 requestAudioFocusSafely()
                 startAudiobookInternal(item)
             }
-            ACTION_PAUSE_AUDIOBOOK -> {
-                pauseAudiobookInternal()
-            }
+            ACTION_PAUSE_AUDIOBOOK -> pauseAudiobookInternal()
             ACTION_SEEK_AUDIOBOOK -> {
                 if (isAudiobookMode) {
                     val posMs = intent.getLongExtra(EXTRA_SEEK_POSITION_MS, 0L).coerceAtLeast(0L)
@@ -873,6 +872,7 @@ class RadioService : Service() {
         currentStationName = item.title
         currentRds = item.groupTitle.ifBlank { "Audiokniha" }
         RadioController.updateRds("")
+        RadioController.requestAudiobookCover(item)
         retryRunnable?.let { handler.removeCallbacks(it) }
         fadeRunnable?.let { handler.removeCallbacks(it) }
         stopAudiobookProgressTicker()
@@ -1056,7 +1056,17 @@ class RadioService : Service() {
     }
 
     private fun resolveCurrentArtwork(): Bitmap {
-        if (isAudiobookMode) return getOrCreateBookArtworkBitmap()
+        if (isAudiobookMode) {
+            val covKey = currentAudiobookItem?.effectiveCoverKey().orEmpty()
+            if (covKey.isNotBlank()) {
+                val bytes = RadioController.audiobookCovers.value[covKey]
+                if (bytes != null && bytes.isNotEmpty()) {
+                    val decoded = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                    if (decoded != null) return decoded
+                }
+            }
+            return getOrCreateBookArtworkBitmap()
+        }
         val faviconUrl = RadioController.currentStation.value.faviconUrl
         if (faviconUrl.isNotBlank()) {
             val bytes = RadioController.stationIcons.value[faviconUrl]
@@ -1089,9 +1099,8 @@ class RadioService : Service() {
         val dur = if (isAudiobookMode) {
             val d = player?.duration ?: -1L
             if (d > 0L && d != C.TIME_UNSET) d else (currentAudiobookItem?.durationMs ?: -1L)
-        } else {
-            -1L
-        }
+        } else -1L
+
         val metaBuilder = AndroidMediaMetadata.Builder()
             .putString(AndroidMediaMetadata.METADATA_KEY_TITLE, currentStationName)
             .putString(AndroidMediaMetadata.METADATA_KEY_ARTIST, currentRds)
@@ -1140,6 +1149,7 @@ class RadioService : Service() {
                         putExtra(EXTRA_AUDIOBOOK_ZIP_ENTRY, b.zipEntryPath)
                         putExtra(EXTRA_AUDIOBOOK_EXT, b.extension)
                         putExtra(EXTRA_AUDIOBOOK_START_POS, b.positionMs)
+                        putExtra(EXTRA_AUDIOBOOK_COVER_KEY, b.effectiveCoverKey())
                     }
                 }
             } else {
@@ -1193,16 +1203,16 @@ class RadioService : Service() {
         val size = 256
         val bmp = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
         val canvas = Canvas(bmp)
-        val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(12, 28, 44) }
-        canvas.drawColor(bgPaint.color)
-        val cyanPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(77, 208, 225) }
-        canvas.drawRoundRect(RectF(46f, 44f, 210f, 214f), 22f, 22f, cyanPaint)
-        val darkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(14, 24, 34) }
-        canvas.drawRoundRect(RectF(68f, 64f, 194f, 194f), 10f, 10f, darkPaint)
+        canvas.drawColor(Color.rgb(12, 28, 44))
+        val pagesPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(235, 228, 212) }
+        canvas.drawRoundRect(RectF(62f, 36f, 208f, 222f), 18f, 18f, pagesPaint)
+        val coverPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(26, 74, 108) }
+        canvas.drawRoundRect(RectF(50f, 32f, 198f, 218f), 18f, 18f, coverPaint)
+        val spinePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(16, 48, 72) }
+        canvas.drawRoundRect(RectF(50f, 32f, 76f, 218f), 12f, 12f, spinePaint)
         val goldPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.rgb(255, 213, 79) }
-        canvas.drawRect(86f, 92f, 174f, 106f, goldPaint)
-        canvas.drawRect(86f, 122f, 162f, 136f, goldPaint)
-        canvas.drawRect(86f, 152f, 148f, 166f, goldPaint)
+        canvas.drawRect(94f, 84f, 172f, 98f, goldPaint)
+        canvas.drawRect(94f, 114f, 158f, 126f, goldPaint)
         cachedBookArtwork = bmp
         return bmp
     }

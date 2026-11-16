@@ -17,17 +17,112 @@ data class AudiobookItem(
     val extension: String = "mp3",
     val positionMs: Long = 0L,
     val durationMs: Long = 0L,
-    val isPlayed: Boolean = false
+    val isPlayed: Boolean = false,
+    val coverKey: String = ""
 )
+
+data class AudiobookGroup(
+    val key: String,
+    val title: String,
+    val chapters: List<AudiobookItem>,
+    val coverKey: String,
+    val representativeItem: AudiobookItem,
+    val playedChaptersCount: Int,
+    val isAllPlayed: Boolean,
+    val hasProgress: Boolean,
+    val resumeChapter: AudiobookItem
+)
+
+fun AudiobookItem.effectiveBookKey(): String {
+    val g = groupTitle.trim()
+    return if (g.isNotEmpty()) {
+        "book_${g.lowercase()}"
+    } else {
+        "single_$id"
+    }
+}
+
+fun AudiobookItem.effectiveBookTitle(): String {
+    val g = groupTitle.trim()
+    return if (g.isNotEmpty()) g else title.trim().ifEmpty { "Audiokniha" }
+}
+
+fun AudiobookItem.effectiveCoverKey(): String {
+    return coverKey.ifBlank { effectiveBookKey() }
+}
+
+fun groupAudiobooksIntoBooks(
+    items: List<AudiobookItem>,
+    currentAudiobookId: String? = null
+): List<AudiobookGroup> {
+    if (items.isEmpty()) return emptyList()
+    val buckets = LinkedHashMap<String, MutableList<AudiobookItem>>()
+    for (item in items) {
+        val key = item.effectiveBookKey()
+        buckets.getOrPut(key) { mutableListOf() }.add(item)
+    }
+    val groups = mutableListOf<AudiobookGroup>()
+    for ((key, rawChapters) in buckets) {
+        val chapters = if (rawChapters.size > 1) {
+            rawChapters.sortedWith { a, b ->
+                val pCmp = naturalCompareStrings(a.zipEntryPath, b.zipEntryPath)
+                if (a.zipEntryPath.isNotEmpty() && b.zipEntryPath.isNotEmpty() && pCmp != 0) {
+                    pCmp
+                } else {
+                    naturalCompareStrings(a.title, b.title)
+                }
+            }
+        } else {
+            rawChapters
+        }
+        val first = chapters.first()
+        val playedCount = chapters.count { it.isPlayed }
+        val allPlayed = playedCount == chapters.size
+        val activeMatch = if (currentAudiobookId != null) {
+            chapters.find { it.id == currentAudiobookId }
+        } else {
+            null
+        }
+        val inProgressMatch = chapters.firstOrNull { !it.isPlayed && it.positionMs > 0L }
+        val firstUnplayed = chapters.firstOrNull { !it.isPlayed }
+        val resume = activeMatch ?: inProgressMatch ?: firstUnplayed ?: first
+        val anyProgress = playedCount > 0 || chapters.any { it.positionMs > 0L }
+        val covKey = chapters.firstOrNull { it.coverKey.isNotBlank() }?.coverKey ?: first.effectiveCoverKey()
+
+        groups.add(
+            AudiobookGroup(
+                key = key,
+                title = first.effectiveBookTitle(),
+                chapters = chapters,
+                coverKey = covKey,
+                representativeItem = first,
+                playedChaptersCount = playedCount,
+                isAllPlayed = allPlayed,
+                hasProgress = anyProgress,
+                resumeChapter = resume
+            )
+        )
+    }
+    return groups
+}
 
 val SUPPORTED_AUDIO_EXTENSIONS: Set<String> = setOf(
     "mp3", "m4b", "m4a", "aac", "mp4", "ogg", "oga",
     "opus", "flac", "wav", "amr", "3gp", "webm", "mkv"
 )
 
+private val SUPPORTED_IMAGE_EXTENSIONS: Set<String> = setOf(
+    "jpg", "jpeg", "png", "webp"
+)
+
 fun isSupportedAudioFileName(name: String): Boolean {
     val ext = name.substringAfterLast('.', "").lowercase().trim()
     return ext in SUPPORTED_AUDIO_EXTENSIONS
+}
+
+fun isSupportedImageFileName(name: String): Boolean {
+    val ext = name.substringAfterLast('.', "").lowercase().trim()
+    return ext in SUPPORTED_IMAGE_EXTENSIONS
 }
 
 fun formatAudioDuration(ms: Long): String {
@@ -307,6 +402,7 @@ expect object RadioController {
     val playbackMode: StateFlow<PlaybackMode>
     val audiobooks: StateFlow<List<AudiobookItem>>
     val currentAudiobook: StateFlow<AudiobookItem?>
+    val audiobookCovers: StateFlow<kotlin.collections.Map<String, ByteArray>>
     val audiobookPositionMs: StateFlow<Long>
     val audiobookDurationMs: StateFlow<Long>
     val isImportingAudiobooks: StateFlow<Boolean>
@@ -330,9 +426,12 @@ expect object RadioController {
     fun pickAudiobookFiles()
     fun pickAudiobookFolder()
     fun selectAndPlayAudiobook(item: AudiobookItem)
+    fun requestAudiobookCover(item: AudiobookItem)
     fun seekAudiobookTo(positionMs: Long)
     fun seekAudiobookRelative(deltaMs: Long)
     fun toggleAudiobookPlayed(itemId: String)
+    fun toggleAudiobookGroupPlayed(groupKey: String)
     fun removeAudiobook(itemId: String)
+    fun removeAudiobookGroup(groupKey: String)
     fun removePlayedAudiobooks()
 }

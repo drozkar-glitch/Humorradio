@@ -1,5 +1,7 @@
 package cz.taximares.radiopm
 
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -9,12 +11,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
@@ -22,6 +27,7 @@ import androidx.compose.material3.Slider
 import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -29,8 +35,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -100,49 +108,161 @@ internal fun normalizeSearchText(input: String): String {
     return sb.toString()
 }
 
+private fun bookCoverInitials(title: String): String {
+    val clean = title.map { if (it.isLetterOrDigit() || it.isWhitespace()) it else ' ' }
+        .joinToString("")
+        .trim()
+    val words = clean.split(Regex("\\s+")).filter { it.isNotBlank() }
+    return when {
+        words.size >= 2 -> "${words[0].first()}${words[1].first()}".uppercase()
+        words.size == 1 && words[0].length >= 2 -> words[0].take(2).uppercase()
+        clean.isNotEmpty() -> clean.take(2).uppercase()
+        else -> "KN"
+    }
+}
+
 @Composable
-internal fun AudiobookBadgeIcon(
-    size: Dp,
-    isActive: Boolean,
-    isPlayed: Boolean
+internal fun BookCoverIcon(
+    representativeItem: AudiobookItem?,
+    title: String,
+    coverBytes: ByteArray?,
+    width: Dp = 46.dp,
+    height: Dp = 58.dp,
+    isActive: Boolean = false,
+    isPlayed: Boolean = false
 ) {
+    LaunchedEffect(representativeItem?.id, representativeItem?.coverKey) {
+        if (representativeItem != null) {
+            RadioController.requestAudiobookCover(representativeItem)
+        }
+    }
+
+    val decodedCover = remember(coverBytes) {
+        if (coverBytes != null && coverBytes.isNotEmpty()) decodeByteArrayToImageBitmap(coverBytes) else null
+    }
+    val initials = remember(title) { bookCoverInitials(title) }
     val greenDone = Color(0xFF00C853)
-    val cornerShape = RoundedCornerShape(size * 0.26f)
-    val bgBrush = when {
-        isPlayed -> Brush.linearGradient(listOf(Color(0xFF0E3B28), Color(0xFF082619)))
-        isActive -> Brush.linearGradient(listOf(Color(0xFFFFD54F), Color(0xFFFFA000)))
-        else -> Brush.linearGradient(listOf(Color(0xFF15384E), Color(0xFF0C2233)))
+    val goldCol = Color(0xFFFFD54F)
+
+    val bookShape = RoundedCornerShape(
+        topStart = 3.dp,
+        bottomStart = 3.dp,
+        topEnd = 7.dp,
+        bottomEnd = 7.dp
+    )
+    val pagesShape = RoundedCornerShape(
+        topStart = 2.dp,
+        bottomStart = 2.dp,
+        topEnd = 7.dp,
+        bottomEnd = 7.dp
+    )
+
+    val fallbackCoverBrush = when {
+        isPlayed -> Brush.linearGradient(listOf(Color(0xFF144B36), Color(0xFF0A2B1E)))
+        isActive -> Brush.linearGradient(listOf(Color(0xFF6B4300), Color(0xFF3A2200)))
+        else -> Brush.linearGradient(listOf(Color(0xFF1B4363), Color(0xFF0D2438)))
     }
-    val borderCol = when {
+    val borderColor = when {
+        isActive -> goldCol
         isPlayed -> greenDone
-        isActive -> Color(0xFFFFD54F)
-        else -> Color(0xFF4DD0E1).copy(alpha = 0.45f)
+        else -> Color.White.copy(alpha = 0.28f)
     }
-    val symbol = when {
-        isPlayed -> "✓"
-        isActive -> "▶"
-        else -> "📚"
-    }
-    val symbolColor = when {
-        isPlayed -> greenDone
-        isActive -> Color(0xFF121212)
-        else -> Color.White
-    }
-    Box(
-        modifier = Modifier
-            .size(size)
-            .clip(cornerShape)
-            .background(bgBrush)
-            .border(if (isActive) 1.5.dp else 1.dp, borderCol, cornerShape),
-        contentAlignment = Alignment.Center
-    ) {
-        Text(
-            text = symbol,
-            color = symbolColor,
-            fontSize = (size.value * 0.40f).sp,
-            fontWeight = FontWeight.ExtraBold,
-            maxLines = 1
-        )
+
+    Box(modifier = Modifier.size(width = width, height = height)) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(start = 5.dp, top = 2.dp)
+                .clip(pagesShape)
+                .background(Color(0xFFEBE4D3))
+                .border(0.75.dp, Color(0xFF9E9583), pagesShape)
+        ) {
+            Canvas(modifier = Modifier.fillMaxSize()) {
+                val x1 = size.width - 2.dp.toPx()
+                drawLine(
+                    color = Color(0x559E9583),
+                    start = Offset(x1, 3.dp.toPx()),
+                    end = Offset(x1, size.height - 3.dp.toPx()),
+                    strokeWidth = 1f
+                )
+            }
+        }
+
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(end = 3.5.dp, bottom = 2.dp)
+                .clip(bookShape)
+                .background(fallbackCoverBrush)
+                .border(if (isActive) 1.5.dp else 1.dp, borderColor, bookShape)
+        ) {
+            if (decodedCover != null) {
+                Image(
+                    bitmap = decodedCover,
+                    contentDescription = title,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize()
+                )
+            } else {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopEnd)
+                        .padding(end = 6.dp)
+                        .width(6.dp)
+                        .height(13.dp)
+                        .background(if (isActive) goldCol else Color(0xFFE53935))
+                )
+                Box(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(start = 7.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = initials,
+                        color = goldCol,
+                        fontSize = (width.value * 0.30f).sp,
+                        fontWeight = FontWeight.ExtraBold,
+                        maxLines = 1
+                    )
+                }
+            }
+
+            Box(
+                modifier = Modifier
+                    .fillMaxHeight()
+                    .width(7.dp)
+                    .background(
+                        Brush.horizontalGradient(
+                            listOf(
+                                Color.Black.copy(alpha = 0.42f),
+                                Color.White.copy(alpha = 0.22f),
+                                Color.Black.copy(alpha = 0.36f),
+                                Color.Transparent
+                            )
+                        )
+                    )
+            )
+        }
+
+        if (isPlayed) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .size(16.dp)
+                    .clip(CircleShape)
+                    .background(greenDone)
+                    .border(1.dp, Color.White, CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Text(
+                    text = "✓",
+                    color = Color.White,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.ExtraBold
+                )
+            }
+        }
     }
 }
 
@@ -150,6 +270,7 @@ internal fun AudiobookBadgeIcon(
 internal fun ColumnAudiobookCatalog(
     palette: LiquidThemePalette,
     audiobooks: List<AudiobookItem>,
+    audiobookCovers: kotlin.collections.Map<String, ByteArray>,
     currentAudiobook: AudiobookItem?,
     playbackMode: PlaybackMode,
     isImporting: Boolean,
@@ -161,261 +282,520 @@ internal fun ColumnAudiobookCatalog(
     val greenPlayed = Color(0xFF00C853)
     val dangerRed = Color(0xFFE53935)
 
-    val filteredBooks = remember(audiobooks, searchQuery) {
-        val q = searchQuery.trim()
-        if (q.isEmpty()) {
-            audiobooks
-        } else {
-            val norm = normalizeSearchText(q)
-            audiobooks.filter { item ->
-                normalizeSearchText(item.title).contains(norm) ||
-                    normalizeSearchText(item.groupTitle).contains(norm)
-            }
+    var openedBookKey by remember { mutableStateOf<String?>(null) }
+
+    val allBooks = remember(audiobooks, currentAudiobook?.id) {
+        groupAudiobooksIntoBooks(audiobooks, currentAudiobook?.id)
+    }
+
+    val activeOpenedBook = remember(allBooks, openedBookKey) {
+        if (openedBookKey == null) null else allBooks.find { it.key == openedBookKey }
+    }
+
+    LaunchedEffect(openedBookKey, activeOpenedBook) {
+        if (openedBookKey != null && activeOpenedBook == null) {
+            openedBookKey = null
         }
     }
-    val playedCount = remember(audiobooks) { audiobooks.count { it.isPlayed } }
+
+    val playedTotalCount = remember(audiobooks) { audiobooks.count { it.isPlayed } }
 
     Column(modifier = modifier.fillMaxWidth()) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp)
-        ) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(palette.goldAccent.copy(alpha = 0.20f))
-                    .border(1.dp, palette.goldAccent.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
-                    .clickable { RadioController.pickAudiobookFiles() }
-                    .padding(vertical = 10.dp, horizontal = 8.dp),
-                contentAlignment = Alignment.Center
+        if (activeOpenedBook == null) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                Text(
-                    text = "+ Soubory / ZIP",
-                    color = palette.goldAccent,
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
-                )
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(palette.goldAccent.copy(alpha = 0.20f))
+                        .border(1.dp, palette.goldAccent.copy(alpha = 0.65f), RoundedCornerShape(12.dp))
+                        .clickable { RadioController.pickAudiobookFiles() }
+                        .padding(vertical = 10.dp, horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "+ Soubory / ZIP",
+                        color = palette.goldAccent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(palette.cyanAccent.copy(alpha = 0.18f))
+                        .border(1.dp, palette.cyanAccent.copy(alpha = 0.60f), RoundedCornerShape(12.dp))
+                        .clickable { RadioController.pickAudiobookFolder() }
+                        .padding(vertical = 10.dp, horizontal = 8.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = "+ Celá složka",
+                        color = palette.cyanAccent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
             }
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .clip(RoundedCornerShape(12.dp))
-                    .background(palette.cyanAccent.copy(alpha = 0.18f))
-                    .border(1.dp, palette.cyanAccent.copy(alpha = 0.60f), RoundedCornerShape(12.dp))
-                    .clickable { RadioController.pickAudiobookFolder() }
-                    .padding(vertical = 10.dp, horizontal = 8.dp),
-                contentAlignment = Alignment.Center
-            ) {
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            OutlinedTextField(
+                value = searchQuery,
+                onValueChange = onSearchQueryChange,
+                placeholder = { Text("Hledat knihu nebo díl...", fontSize = 13.sp) },
+                singleLine = true,
+                modifier = Modifier.fillMaxWidth(),
+                colors = OutlinedTextFieldDefaults.colors(
+                    focusedTextColor = palette.primaryText,
+                    unfocusedTextColor = palette.primaryText,
+                    focusedBorderColor = palette.cyanAccent,
+                    unfocusedBorderColor = palette.cardBorder,
+                    focusedPlaceholderColor = palette.secondaryText,
+                    unfocusedPlaceholderColor = palette.secondaryText
+                )
+            )
+
+            if (isImporting) {
+                Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    text = "+ Celá složka",
+                    text = "⏳ Načítám knihy a obálky z audiosouborů...",
                     color = palette.cyanAccent,
                     fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = 1
+                    fontWeight = FontWeight.SemiBold
                 )
             }
-        }
 
-        Spacer(modifier = Modifier.height(8.dp))
+            if (playedTotalCount > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "Knih: ${allBooks.size} • Přehraných dílů: $playedTotalCount",
+                        color = palette.secondaryText,
+                        fontSize = 11.sp
+                    )
+                    Box(
+                        modifier = Modifier
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(dangerRed.copy(alpha = 0.16f))
+                            .border(1.dp, dangerRed.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                            .clickable { RadioController.removePlayedAudiobooks() }
+                            .padding(horizontal = 9.dp, vertical = 4.dp)
+                    ) {
+                        Text(
+                            text = "Smazat přehrané",
+                            color = dangerRed,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1
+                        )
+                    }
+                }
+            }
 
-        OutlinedTextField(
-            value = searchQuery,
-            onValueChange = onSearchQueryChange,
-            placeholder = { Text("Hledat kapitolu nebo knihu...", fontSize = 13.sp) },
-            singleLine = true,
-            modifier = Modifier.fillMaxWidth(),
-            colors = OutlinedTextFieldDefaults.colors(
-                focusedTextColor = palette.primaryText,
-                unfocusedTextColor = palette.primaryText,
-                focusedBorderColor = palette.cyanAccent,
-                unfocusedBorderColor = palette.cardBorder,
-                focusedPlaceholderColor = palette.secondaryText,
-                unfocusedPlaceholderColor = palette.secondaryText
-            )
-        )
+            Spacer(modifier = Modifier.height(10.dp))
 
-        if (isImporting) {
-            Spacer(modifier = Modifier.height(8.dp))
-            Text(
-                text = "⏳ Načítám audio soubory a obsah ZIP archivů...",
-                color = palette.cyanAccent,
-                fontSize = 12.sp,
-                fontWeight = FontWeight.SemiBold
-            )
-        }
+            val filteredBooks = remember(allBooks, searchQuery) {
+                val q = searchQuery.trim()
+                if (q.isEmpty()) {
+                    allBooks
+                } else {
+                    val norm = normalizeSearchText(q)
+                    allBooks.filter { grp ->
+                        normalizeSearchText(grp.title).contains(norm) ||
+                            grp.chapters.any { normalizeSearchText(it.title).contains(norm) }
+                    }
+                }
+            }
 
-        if (playedCount > 0) {
-            Spacer(modifier = Modifier.height(8.dp))
+            if (filteredBooks.isEmpty()) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .fillMaxWidth()
+                        .padding(18.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text(
+                        text = if (allBooks.isEmpty()) {
+                            "Knihovna audioknih je prázdný seznam.\n\nKlepni na „+ Celá složka“ nebo „+ Soubory / ZIP“ – každá složka či ZIP se zobrazí jako vázaná kniha s obálkou přímo z audiosouboru."
+                        } else {
+                            "Žádná kniha neodpovídá hledání „$searchQuery“."
+                        },
+                        color = palette.secondaryText,
+                        fontSize = 13.sp,
+                        textAlign = TextAlign.Center
+                    )
+                }
+            } else {
+                LazyColumn(
+                    modifier = Modifier.weight(1f),
+                    verticalArrangement = Arrangement.spacedBy(9.dp),
+                    contentPadding = PaddingValues(bottom = 20.dp)
+                ) {
+                    items(filteredBooks.size, key = { filteredBooks[it].key }) { idx ->
+                        val book = filteredBooks[idx]
+                        val isCurrentBook = playbackMode == PlaybackMode.AUDIOBOOK &&
+                            currentAudiobook?.effectiveBookKey() == book.key
+                        val isMultiPart = book.chapters.size > 1
+
+                        GlassCardBox(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (isMultiPart) {
+                                        openedBookKey = book.key
+                                    } else {
+                                        onSelectAudiobook(book.chapters.first())
+                                    }
+                                },
+                            borderColor = when {
+                                isCurrentBook -> palette.goldAccent
+                                book.isAllPlayed -> greenPlayed.copy(alpha = 0.55f)
+                                else -> palette.cardBorder
+                            },
+                            backgroundColor = if (isCurrentBook) palette.activeCardBg else palette.cardBg
+                        ) {
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(10.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                BookCoverIcon(
+                                    representativeItem = book.representativeItem,
+                                    title = book.title,
+                                    coverBytes = audiobookCovers[book.coverKey],
+                                    width = 46.dp,
+                                    height = 58.dp,
+                                    isActive = isCurrentBook,
+                                    isPlayed = book.isAllPlayed
+                                )
+                                Spacer(modifier = Modifier.width(12.dp))
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = book.title,
+                                        color = when {
+                                            isCurrentBook -> palette.goldAccent
+                                            book.isAllPlayed -> palette.secondaryText
+                                            else -> palette.primaryText
+                                        },
+                                        fontSize = 14.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        maxLines = 2,
+                                        lineHeight = 18.sp,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                    Spacer(modifier = Modifier.height(2.dp))
+                                    if (isMultiPart) {
+                                        val statusText = when {
+                                            book.isAllPlayed -> "${book.chapters.size} dílů • ✓ Celá přehraná"
+                                            book.hasProgress -> "${book.chapters.size} dílů • Rozposloucháno (${book.playedChaptersCount}/${book.chapters.size})"
+                                            else -> "${book.chapters.size} dílů • Klepni pro výběr dílu"
+                                        }
+                                        val statusCol = when {
+                                            book.isAllPlayed -> greenPlayed
+                                            book.hasProgress -> palette.cyanAccent
+                                            else -> palette.secondaryText
+                                        }
+                                        Text(
+                                            text = statusText,
+                                            color = statusCol,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    } else {
+                                        val only = book.chapters.first()
+                                        val singleLabel = when {
+                                            only.isPlayed -> "1 díl • ✓ Přehráno"
+                                            only.positionMs > 0L -> {
+                                                val p = formatAudioDuration(only.positionMs)
+                                                val d = if (only.durationMs > 0L) " / ${formatAudioDuration(only.durationMs)}" else ""
+                                                "▶ Pokračovat od $p$d"
+                                            }
+                                            else -> "1 díl • ${only.extension.uppercase()}"
+                                        }
+                                        val singleColor = when {
+                                            only.isPlayed -> greenPlayed
+                                            only.positionMs > 0L -> palette.cyanAccent
+                                            else -> palette.secondaryText
+                                        }
+                                        Text(
+                                            text = singleLabel,
+                                            color = singleColor,
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                    }
+                                }
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(if (book.isAllPlayed) greenPlayed.copy(alpha = 0.22f) else palette.cardBg)
+                                        .border(1.dp, if (book.isAllPlayed) greenPlayed else palette.cardBorder, RoundedCornerShape(8.dp))
+                                        .clickable { RadioController.toggleAudiobookGroupPlayed(book.key) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "✓",
+                                        color = if (book.isAllPlayed) greenPlayed else palette.secondaryText,
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(5.dp))
+                                Box(
+                                    modifier = Modifier
+                                        .size(30.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(dangerRed.copy(alpha = 0.16f))
+                                        .border(1.dp, dangerRed.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
+                                        .clickable { RadioController.removeAudiobookGroup(book.key) },
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "✕",
+                                        color = dangerRed,
+                                        fontSize = 12.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Přehráno: $playedCount z ${audiobooks.size}",
-                    color = palette.secondaryText,
-                    fontSize = 11.sp
-                )
                 Box(
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
-                        .background(dangerRed.copy(alpha = 0.16f))
-                        .border(1.dp, dangerRed.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
-                        .clickable { RadioController.removePlayedAudiobooks() }
-                        .padding(horizontal = 9.dp, vertical = 4.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(palette.cardBg)
+                        .border(1.dp, palette.cardBorder, RoundedCornerShape(10.dp))
+                        .clickable { openedBookKey = null }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
                 ) {
                     Text(
-                        text = "Smazat přehrané",
-                        color = dangerRed,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
+                        text = "← Všechny knihy",
+                        color = palette.cyanAccent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(palette.goldAccent.copy(alpha = 0.22f))
+                        .border(1.dp, palette.goldAccent.copy(alpha = 0.70f), RoundedCornerShape(10.dp))
+                        .clickable { onSelectAudiobook(activeOpenedBook.resumeChapter) }
+                        .padding(horizontal = 12.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        text = if (activeOpenedBook.hasProgress && !activeOpenedBook.isAllPlayed) "▶ Pokračovat" else "▶ Přehrát knihu",
+                        color = palette.goldAccent,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
                         maxLines = 1
                     )
                 }
             }
-        }
 
-        Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
-        if (filteredBooks.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxWidth()
-                    .padding(18.dp),
-                contentAlignment = Alignment.Center
+            GlassCardBox(
+                modifier = Modifier.fillMaxWidth(),
+                borderColor = palette.goldAccent.copy(alpha = 0.45f),
+                backgroundColor = palette.cardBg
             ) {
-                Text(
-                    text = if (audiobooks.isEmpty()) {
-                        "Seznam audioknih je prázdný.\n\nKlepni nahoře na „+ Soubory / ZIP“ nebo „+ Celá složka“ a vyber audio soubory (MP3, M4B, HE-AACv2, FLAC, OGG, WAV) nebo přímo .ZIP archiv."
-                    } else {
-                        "Žádná položka neodpovídá hledání „$searchQuery“."
-                    },
-                    color = palette.secondaryText,
-                    fontSize = 13.sp,
-                    textAlign = TextAlign.Center
-                )
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    BookCoverIcon(
+                        representativeItem = activeOpenedBook.representativeItem,
+                        title = activeOpenedBook.title,
+                        coverBytes = audiobookCovers[activeOpenedBook.coverKey],
+                        width = 42.dp,
+                        height = 54.dp,
+                        isActive = true,
+                        isPlayed = activeOpenedBook.isAllPlayed
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = activeOpenedBook.title,
+                            color = palette.goldAccent,
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.ExtraBold,
+                            maxLines = 2,
+                            lineHeight = 19.sp,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                        Text(
+                            text = "Přehráno ${activeOpenedBook.playedChaptersCount} z ${activeOpenedBook.chapters.size} dílů",
+                            color = palette.secondaryText,
+                            fontSize = 11.sp
+                        )
+                    }
+                }
             }
-        } else {
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            val chapters = activeOpenedBook.chapters
             LazyColumn(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
+                verticalArrangement = Arrangement.spacedBy(7.dp),
                 contentPadding = PaddingValues(bottom = 20.dp)
             ) {
-                items(filteredBooks.size, key = { filteredBooks[it].id }) { index ->
-                    val book = filteredBooks[index]
-                    val isCurrent = playbackMode == PlaybackMode.AUDIOBOOK && currentAudiobook?.id == book.id
+                items(chapters.size, key = { chapters[it].id }) { index ->
+                    val part = chapters[index]
+                    val isCurrentPart = playbackMode == PlaybackMode.AUDIOBOOK && currentAudiobook?.id == part.id
                     GlassCardBox(
                         modifier = Modifier
                             .fillMaxWidth()
-                            .clickable { onSelectAudiobook(book) },
+                            .clickable { onSelectAudiobook(part) },
                         borderColor = when {
-                            isCurrent -> palette.goldAccent
-                            book.isPlayed -> greenPlayed.copy(alpha = 0.55f)
+                            isCurrentPart -> palette.goldAccent
+                            part.isPlayed -> greenPlayed.copy(alpha = 0.50f)
                             else -> palette.cardBorder
                         },
-                        backgroundColor = if (isCurrent) palette.activeCardBg else palette.cardBg
+                        backgroundColor = if (isCurrentPart) palette.activeCardBg else palette.cardBg
                     ) {
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .padding(10.dp),
+                                .padding(horizontal = 10.dp, vertical = 9.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            AudiobookBadgeIcon(
-                                size = 40.dp,
-                                isActive = isCurrent,
-                                isPlayed = book.isPlayed
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        when {
+                                            isCurrentPart -> palette.goldAccent
+                                            part.isPlayed -> greenPlayed.copy(alpha = 0.20f)
+                                            else -> palette.rdsBoxBg
+                                        }
+                                    )
+                                    .border(
+                                        1.dp,
+                                        when {
+                                            isCurrentPart -> palette.goldAccent
+                                            part.isPlayed -> greenPlayed
+                                            else -> palette.cardBorder
+                                        },
+                                        CircleShape
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    text = when {
+                                        isCurrentPart -> "▶"
+                                        part.isPlayed -> "✓"
+                                        else -> "${index + 1}"
+                                    },
+                                    color = when {
+                                        isCurrentPart -> Color(0xFF121212)
+                                        part.isPlayed -> greenPlayed
+                                        else -> palette.primaryText
+                                    },
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    maxLines = 1
+                                )
+                            }
                             Spacer(modifier = Modifier.width(10.dp))
                             Column(modifier = Modifier.weight(1f)) {
                                 Text(
-                                    text = book.title,
+                                    text = part.title,
                                     color = when {
-                                        isCurrent -> palette.goldAccent
-                                        book.isPlayed -> palette.secondaryText
+                                        isCurrentPart -> palette.goldAccent
+                                        part.isPlayed -> palette.secondaryText
                                         else -> palette.primaryText
                                     },
-                                    fontSize = 14.sp,
+                                    fontSize = 13.sp,
                                     fontWeight = FontWeight.Bold,
                                     maxLines = 1,
                                     overflow = TextOverflow.Ellipsis
                                 )
-                                if (book.groupTitle.isNotBlank()) {
-                                    Text(
-                                        text = book.groupTitle,
-                                        color = palette.secondaryText,
-                                        fontSize = 11.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
-                                }
-                                val stateLabel = when {
-                                    book.isPlayed -> "✓ Přehráno"
-                                    book.positionMs > 0L -> {
-                                        val p = formatAudioDuration(book.positionMs)
-                                        val d = if (book.durationMs > 0L) " / ${formatAudioDuration(book.durationMs)}" else ""
+                                val partState = when {
+                                    part.isPlayed -> "✓ Přehráno"
+                                    part.positionMs > 0L -> {
+                                        val p = formatAudioDuration(part.positionMs)
+                                        val d = if (part.durationMs > 0L) " / ${formatAudioDuration(part.durationMs)}" else ""
                                         "▶ Pokračovat od $p$d"
                                     }
-                                    else -> {
-                                        val zipTag = if (book.zipEntryPath.isNotEmpty()) " • ZIP" else ""
-                                        "Nepřehráno • ${book.extension.uppercase()}$zipTag"
-                                    }
-                                }
-                                val stateColor = when {
-                                    book.isPlayed -> greenPlayed
-                                    book.positionMs > 0L -> palette.cyanAccent
-                                    else -> palette.secondaryText
+                                    else -> "Nepřehráno • ${part.extension.uppercase()}"
                                 }
                                 Text(
-                                    text = stateLabel,
-                                    color = stateColor,
+                                    text = partState,
+                                    color = when {
+                                        part.isPlayed -> greenPlayed
+                                        part.positionMs > 0L -> palette.cyanAccent
+                                        else -> palette.secondaryText
+                                    },
                                     fontSize = 11.sp,
                                     fontWeight = FontWeight.SemiBold,
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis
+                                    maxLines = 1
                                 )
                             }
                             Spacer(modifier = Modifier.width(6.dp))
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(RoundedCornerShape(8.dp))
-                                    .background(
-                                        if (book.isPlayed) greenPlayed.copy(alpha = 0.22f)
-                                        else palette.cardBg
-                                    )
-                                    .border(
-                                        1.dp,
-                                        if (book.isPlayed) greenPlayed else palette.cardBorder,
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable { RadioController.toggleAudiobookPlayed(book.id) },
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(7.dp))
+                                    .background(if (part.isPlayed) greenPlayed.copy(alpha = 0.22f) else palette.cardBg)
+                                    .border(1.dp, if (part.isPlayed) greenPlayed else palette.cardBorder, RoundedCornerShape(7.dp))
+                                    .clickable { RadioController.toggleAudiobookPlayed(part.id) },
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = "✓",
-                                    color = if (book.isPlayed) greenPlayed else palette.secondaryText,
-                                    fontSize = 14.sp,
+                                    color = if (part.isPlayed) greenPlayed else palette.secondaryText,
+                                    fontSize = 12.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }
-                            Spacer(modifier = Modifier.width(6.dp))
+                            Spacer(modifier = Modifier.width(5.dp))
                             Box(
                                 modifier = Modifier
-                                    .size(32.dp)
-                                    .clip(RoundedCornerShape(8.dp))
+                                    .size(28.dp)
+                                    .clip(RoundedCornerShape(7.dp))
                                     .background(dangerRed.copy(alpha = 0.16f))
-                                    .border(1.dp, dangerRed.copy(alpha = 0.45f), RoundedCornerShape(8.dp))
-                                    .clickable { RadioController.removeAudiobook(book.id) },
+                                    .border(1.dp, dangerRed.copy(alpha = 0.45f), RoundedCornerShape(7.dp))
+                                    .clickable { RadioController.removeAudiobook(part.id) },
                                 contentAlignment = Alignment.Center
                             ) {
                                 Text(
                                     text = "✕",
                                     color = dangerRed,
-                                    fontSize = 13.sp,
+                                    fontSize = 11.sp,
                                     fontWeight = FontWeight.Bold
                                 )
                             }

@@ -14,6 +14,9 @@ env:
   PUBLISH_GOOGLE: "true"
   PUBLISH_IOS: "true"
   PUBLISH_HUAWEI: "false"
+  PUBLISH_INTERNAL_ONLY: "true"
+  UPLOAD_GP_GRAPHICS: "false"
+  FORCE_REFRESH_SCREENSHOTS: "false"
   BUILD_IOS: "true"
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
   GRADLE_OPTS: "-Djava.net.preferIPv4Stack=true -Dorg.gradle.internal.http.connectionTimeout=120000 -Dorg.gradle.internal.http.socketTimeout=120000 -Dorg.gradle.internal.repository.max.tentatives=6 -Dorg.gradle.internal.repository.initial.backoff=3000"
@@ -114,8 +117,6 @@ jobs:
         run: |
           if [ "$PUBLISH_TO_STORES" != "true" ]; then
             echo "ℹ️ Publikace do obchodu je vypnuta. Preskakuji Google Play."
-          elif [ "$PUBLISH_GOOGLE" != "true" ] && [ "$PUBLISH_HUAWEI" != "true" ]; then
-            echo "⏭️ Publikace pro Google Play i Huawei je vypnuta prepinaci. Preskakuji Android obchody."
           elif [ -s "iosApp/signing/store_google_huawei.py" ]; then
             pip3 install --quiet --break-system-packages google-api-python-client google-auth-httplib2 google-auth-oauthlib pyjwt cryptography requests Pillow resvg-py || pip3 install --quiet google-api-python-client google-auth-httplib2 google-auth-oauthlib pyjwt cryptography requests Pillow resvg-py || pip3 install --quiet --break-system-packages google-api-python-client google-auth-httplib2 google-auth-oauthlib pyjwt cryptography requests Pillow || pip3 install --quiet google-api-python-client google-auth-httplib2 google-auth-oauthlib pyjwt cryptography requests Pillow
             python3 iosApp/signing/store_google_huawei.py
@@ -661,7 +662,7 @@ jobs:
           mkdir -p build/ios/xcarchive build/ios/ipa
           xcodebuild -project iosApp/iosApp.xcodeproj -scheme iosApp -configuration Release -destination "generic/platform=iOS" -archivePath build/ios/xcarchive/iosApp.xcarchive archive COMPILER_INDEX_STORE_ENABLE=NO
           xcodebuild -exportArchive -archivePath build/ios/xcarchive/iosApp.xcarchive -exportPath build/ios/ipa -exportOptionsPlist "$HOME/export_options.plist"
-          if [ "$PUBLISH_TO_STORES" = "true" ] && [ "$PUBLISH_IOS" = "true" ]; then
+          if [ "$PUBLISH_TO_STORES" = "true" ]; then
             MAX_PUB_ATTEMPTS=5; PUB_ATTEMPT=1; APP_NOT_IN_ASC=0; UPLOAD_OK=0
             while [ $PUB_ATTEMPT -le $MAX_PUB_ATTEMPTS ]; do
               set +e
@@ -906,4 +907,3 @@ jobs:
         with:
           name: ${{ env.APP_NAME }}-iOS-IPA
           path: build/ios/ipa/*.ipa
-# Sync: 2026-11-15T15:04:22.735Z

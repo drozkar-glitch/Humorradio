@@ -453,6 +453,7 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
 
     val playbackMode by RadioController.playbackMode.collectAsState()
     val audiobooks by RadioController.audiobooks.collectAsState()
+    val audiobookCovers by RadioController.audiobookCovers.collectAsState()
     val currentAudiobook by RadioController.currentAudiobook.collectAsState()
     val audiobookPositionMs by RadioController.audiobookPositionMs.collectAsState()
     val audiobookDurationMs by RadioController.audiobookDurationMs.collectAsState()
@@ -461,6 +462,9 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
     val isBookMode = playbackMode == PlaybackMode.AUDIOBOOK
     val displayRds = remember(isPlaying, rdsText, currentStation.name) {
         filterSongRds(isPlaying, rdsText, currentStation.name)
+    }
+    val booksCount = remember(audiobooks) {
+        groupAudiobooksIntoBooks(audiobooks).size
     }
 
     val drawerState = rememberDrawerState(initialValue = DrawerValue.Closed)
@@ -517,7 +521,7 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = if (showAudiobooksInDrawer) "Audioknihy" else "Katalog českých rádií",
+                                text = if (showAudiobooksInDrawer) "Knihovna audioknih" else "Katalog českých rádií",
                                 color = palette.goldAccent,
                                 fontSize = 17.sp,
                                 fontWeight = FontWeight.Bold,
@@ -526,7 +530,7 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                             )
                             Text(
                                 text = if (showAudiobooksInDrawer) {
-                                    "${audiobooks.size} položek v seznamu"
+                                    "$booksCount knih (${audiobooks.size} dílů)"
                                 } else if (isUpdatingStations) {
                                     "Aktualizuji seznam..."
                                 } else {
@@ -583,6 +587,7 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                         ColumnAudiobookCatalog(
                             palette = palette,
                             audiobooks = audiobooks,
+                            audiobookCovers = audiobookCovers,
                             currentAudiobook = currentAudiobook,
                             playbackMode = playbackMode,
                             isImporting = isImportingAudiobooks,
@@ -699,7 +704,7 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                                                     .background(palette.goldAccent.copy(alpha = 0.18f))
                                                     .clickable { stationForPresetDialog = station }
                                                     .padding(horizontal = 8.dp, vertical = 5.dp)
-                                                ) {
+                                            ) {
                                                 Text(
                                                     text = "Předvolba",
                                                     color = palette.goldAccent,
@@ -822,8 +827,13 @@ private fun PhoneRadioScreen(palette: LiquidThemePalette) {
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         if (isBookMode) {
-                            AudiobookBadgeIcon(
-                                size = 56.dp,
+                            val activeCoverKey = currentAudiobook?.effectiveCoverKey().orEmpty()
+                            BookCoverIcon(
+                                representativeItem = currentAudiobook,
+                                title = currentAudiobook?.effectiveBookTitle() ?: "Audiokniha",
+                                coverBytes = audiobookCovers[activeCoverKey],
+                                width = 50.dp,
+                                height = 64.dp,
                                 isActive = isPlaying,
                                 isPlayed = currentAudiobook?.isPlayed == true
                             )
